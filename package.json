@@ -6,22 +6,22 @@
   "license": "MIT",
   "repository": "github:IanGordonOne/kb-projection",
   "exports": {
-    ".":           "./src/lib/logseqToAstro.ts",
-    "./loader":    "./src/lib/loader.ts",
-    "./filters":   "./src/filters/index.ts",
-    "./manifest":  "./src/manifest/schema.ts",
-    "./manifest/validate":          "./src/manifest/validate.ts",
-    "./manifest/audit-drift":       "./src/manifest/audit-drift.ts",
-    "./manifest/patch":             "./src/manifest/patch.ts",
-    "./manifest/apply-patch":       "./src/manifest/apply-patch.ts",
-    "./manifest/preview":           "./src/manifest/preview.ts",
+    ".": "./src/lib/logseqToAstro.ts",
+    "./loader": "./src/lib/loader.ts",
+    "./filters": "./src/filters/index.ts",
+    "./manifest": "./src/manifest/schema.ts",
+    "./manifest/validate": "./src/manifest/validate.ts",
+    "./manifest/audit-drift": "./src/manifest/audit-drift.ts",
+    "./manifest/patch": "./src/manifest/patch.ts",
+    "./manifest/apply-patch": "./src/manifest/apply-patch.ts",
+    "./manifest/preview": "./src/manifest/preview.ts",
     "./manifest/propose-placement": "./src/manifest/propose-placement.ts",
-    "./manifest/logseq-meta":       "./src/manifest/logseqMeta.ts"
+    "./manifest/logseq-meta": "./src/manifest/logseqMeta.ts"
   },
   "bin": {
-    "kb-validate":          "./bin/kb-validate.ts",
-    "kb-audit-drift":       "./bin/kb-audit-drift.ts",
-    "kb-preview":           "./bin/kb-preview.ts",
+    "kb-validate": "./bin/kb-validate.ts",
+    "kb-audit-drift": "./bin/kb-audit-drift.ts",
+    "kb-preview": "./bin/kb-preview.ts",
     "kb-propose-placement": "./bin/kb-propose-placement.ts"
   },
   "scripts": {
@@ -37,6 +37,8 @@
     }
   },
   "devDependencies": {
+    "@types/bun": "^1.3.13",
+    "@types/node": "^25.6.0",
     "astro": "^5.0.0",
     "typescript": "^5.0.0"
   },
