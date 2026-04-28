@@ -1,0 +1,44 @@
+{
+  "name": "@kyber/kb-projection",
+  "version": "0.1.0",
+  "description": "LogSeq → Astro projection engine: transforms, content loader, manifest editor, filter pipeline.",
+  "type": "module",
+  "license": "MIT",
+  "repository": "github:IanGordonOne/kb-projection",
+  "exports": {
+    ".":           "./src/lib/logseqToAstro.ts",
+    "./loader":    "./src/lib/loader.ts",
+    "./filters":   "./src/filters/index.ts",
+    "./manifest":  "./src/manifest/schema.ts",
+    "./manifest/validate":          "./src/manifest/validate.ts",
+    "./manifest/audit-drift":       "./src/manifest/audit-drift.ts",
+    "./manifest/patch":             "./src/manifest/patch.ts",
+    "./manifest/apply-patch":       "./src/manifest/apply-patch.ts",
+    "./manifest/preview":           "./src/manifest/preview.ts",
+    "./manifest/propose-placement": "./src/manifest/propose-placement.ts",
+    "./manifest/logseq-meta":       "./src/manifest/logseqMeta.ts"
+  },
+  "bin": {
+    "kb-validate":          "./bin/kb-validate.ts",
+    "kb-audit-drift":       "./bin/kb-audit-drift.ts",
+    "kb-preview":           "./bin/kb-preview.ts",
+    "kb-propose-placement": "./bin/kb-propose-placement.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "astro": "^5.0.0"
+  },
+  "peerDependenciesMeta": {
+    "astro": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "astro": "^5.0.0",
+    "typescript": "^5.0.0"
+  },
+  "private": true
+}
