@@ -77,7 +77,7 @@ bun run typecheck
 
 ## Reference consumer
 
-[`777westwood`](https://github.com/IanGordonOne/777westwood) — the original consumer; demonstrates `createKbLoader` integration, redaction hooks, manifest curation, and the perky-tarsier filter pipeline.
+`777westwood` (private repo) — the original consumer; demonstrates `createKbLoader` integration, host-supplied redact rules via `redactRulesByMode`, manifest curation, and the per-entry filter pipeline. Public consumers welcome; if you adopt this engine for your own KB site, file an issue and I'll link it here.
 
 ## History
 
