@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.0 — 2026-04-28
+
+### Removed
+
+- `legacy/` subdirectory (transformer, targets/astro, projectionBridge, healthMonitor, build-manifest). Pre-loader materialized projection path retired. The `kyber/scripts/regression/777westwood-astro.ts` byte-equivalence test (the only consumer) was retired in the same cycle.
+
+### Changed
+
+- `src/filters/redact.ts` — refactored to be source-clean. Engine now ships only `none` (no-op) as a built-in mode; site-specific patterns are supplied by the host via `createKbLoader({ redactRulesByMode: ... })`. See [kbp-vc3](https://github.com/IanGordonOne/kb-projection/issues) for context.
+- `src/filters/index.ts` — exports `RedactRule` + `RedactRules` types.
+- `src/manifest/schema.ts` — `RedactMode` is now `string` (host-keyed); `REDACT_MODE_VALUES` contains only the engine's built-in modes.
+- `src/manifest/validate.ts` — drops enum enforcement on redact mode; only requires non-empty string. Mode validity is host-known.
+- `src/manifest/audit-drift.ts` — `filter-redact-mode-unknown` is now opt-in via `knownRedactModes` option.
+
+### Added
+
+- `kb-projection-vc3` — public visibility flip (private → public).
+
 ## v0.1.0 — 2026-04-28
 
 Initial extraction from `~/.claude/USER/skills/_KNOWLEDGE/_KNOWLEDGE_PROJECT/Tools/` (PAI USER skill tree).

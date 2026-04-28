@@ -1,6 +1,6 @@
 {
   "name": "@kyber/kb-projection",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "LogSeq → Astro projection engine: transforms, content loader, manifest editor, filter pipeline.",
   "type": "module",
   "license": "MIT",
