@@ -23,7 +23,7 @@ import {
   stripLeadingPropertyBlock,
 } from '../lib/logseqToAstro';
 import type { FilterSpec, PublishEntry } from '../manifest/schema';
-import { applyRedact } from './redact';
+import { applyRedact, type RedactRules } from './redact';
 
 /**
  * Minimal manifest shape needed by the orchestrator. Mirrors the loader's
@@ -55,6 +55,13 @@ export interface FilterContext {
    * its astro-loader logger here.
    */
   logger?: { warn: (msg: string) => void };
+  /**
+   * Host-supplied redact rules table. Keyed by mode name (e.g. 'light').
+   * Mode `none` is built-in (no-op). Unknown modes no-op silently;
+   * cli-audit-drift's `filter-redact-mode-unknown` finding flags the
+   * absence at audit time given the available mode list.
+   */
+  redactRulesByMode?: Record<string, RedactRules>;
 }
 
 /**
@@ -144,7 +151,10 @@ export function applyFilters(
     } else if ('append' in f) {
       out = applySplice(out, f.append, 'append', ctx);
     } else if ('redact' in f) {
-      out = applyRedact(out, { mode: f.redact });
+      out = applyRedact(out, {
+        mode: f.redact,
+        rulesByMode: ctx.redactRulesByMode,
+      });
     }
   }
   return out;

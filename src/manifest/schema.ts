@@ -24,9 +24,19 @@ export const TIER_VALUES: readonly Tier[] = ['seed', '1-hop', '2-hop', 'n-hop'] 
 export type Redact = 'light';
 export const REDACT_VALUES: readonly Redact[] = ['light'] as const;
 
-/** v1 closed set of code-filter modes for the `redact` filter. */
-export type RedactMode = 'light' | 'none';
-export const REDACT_MODE_VALUES: readonly RedactMode[] = ['light', 'none'] as const;
+/**
+ * Code-filter mode for the `redact` filter. The string is keyed against
+ * the host site's `redactRulesByMode` table supplied to createKbLoader.
+ * The engine ships only `none` (no-op) as a built-in; everything else
+ * is host-supplied (no site-specific patterns in the engine).
+ *
+ * `REDACT_MODE_VALUES` is kept for back-compat with audit-drift's
+ * unknown-mode finding; it lists ONLY the engine's built-in modes.
+ * Host audit-drift invocations should pass the host's known modes
+ * (see cli-audit-drift `--known-redact-modes`).
+ */
+export type RedactMode = string;
+export const REDACT_MODE_VALUES: readonly string[] = ['none'] as const;
 
 /**
  * Per-entry filter pipeline element. Discriminated union; cli-validate

@@ -246,10 +246,21 @@ describe('parseManifest — filters (kyber-3fh.13)', () => {
     expect(r.valid).toBe(false);
   });
 
-  test('rejects unknown redact mode', () => {
+  test('accepts arbitrary string redact mode (host-supplied)', () => {
+    // Mode validity is host-known; the engine accepts any non-empty
+    // string at the schema layer. cli-audit-drift's --known-redact-modes
+    // option does host-aware checking.
     const r = parseManifest({
       graphPath: '/g',
-      entries: [{ title: 'X', tier: 'seed', filters: [{ redact: 'heavy' }] }],
+      entries: [{ title: 'X', tier: 'seed', filters: [{ redact: 'host-defined' }] }],
+    });
+    expect(r.valid).toBe(true);
+  });
+
+  test('rejects empty-string redact mode', () => {
+    const r = parseManifest({
+      graphPath: '/g',
+      entries: [{ title: 'X', tier: 'seed', filters: [{ redact: '' }] }],
     });
     expect(r.valid).toBe(false);
     expect(r.errors.some((e) => e.path === '$.entries[0].filters[0].redact')).toBe(true);

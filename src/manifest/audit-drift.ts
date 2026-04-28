@@ -108,6 +108,15 @@ export interface DriftAuditOptions {
   detectCandidates?: boolean;
   /** Cap candidates emitted per audit run to keep the output triageable. Default 25. */
   maxCandidates?: number;
+  /**
+   * Known redact modes (built-in `none` plus any host-supplied via
+   * `redactRulesByMode`). When provided, the audit emits
+   * `filter-redact-mode-unknown` for redact filters whose mode is not
+   * in this list. When omitted, the audit skips redact-mode checking
+   * entirely (modes are presumed valid; runtime no-op handles the
+   * unknown case at apply time).
+   */
+  knownRedactModes?: readonly string[];
 }
 
 const KNOWN_ENTRY_FIELDS = new Set([
@@ -138,6 +147,7 @@ export function auditDrift(
   const hops = options.hops ?? 1;
   const detectCandidates = options.detectCandidates ?? true;
   const maxCandidates = options.maxCandidates ?? 25;
+  const knownRedactModes = options.knownRedactModes;
 
   const findings: DriftFinding[] = [];
   const counts: Record<DriftSeverity, number> = { error: 0, warn: 0, info: 0 };
@@ -241,14 +251,18 @@ export function auditDrift(
     for (let j = 0; j < e.filters.length; j++) {
       const f = e.filters[j] as FilterSpec;
       if ('redact' in f) {
-        if (!REDACT_MODE_VALUES.includes(f.redact)) {
+        // Mode validity is host-known; skip if knownRedactModes not supplied.
+        if (
+          knownRedactModes !== undefined &&
+          !knownRedactModes.includes(f.redact)
+        ) {
           findings.push({
             id: makeId('filter-redact-mode-unknown', `${e.title}#${j}:${String(f.redact)}`),
             kind: 'filter-redact-mode-unknown',
             severity: 'error',
             message:
               `entry "${e.title}" filters[${j}] has unknown redact mode ` +
-              `${JSON.stringify(f.redact)}; expected one of ${REDACT_MODE_VALUES.join(', ')}.`,
+              `${JSON.stringify(f.redact)}; expected one of ${knownRedactModes.join(', ')}.`,
             ref: { entryIndex: i, title: e.title, filterIndex: j },
           });
           counts.error += 1;

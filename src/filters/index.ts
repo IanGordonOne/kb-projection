@@ -13,4 +13,10 @@
  */
 
 export { applyFilters, type FilterContext } from './applyFilters';
-export { applyRedact, type RedactMode, type RedactParams } from './redact';
+export {
+  applyRedact,
+  type RedactMode,
+  type RedactParams,
+  type RedactRule,
+  type RedactRules,
+} from './redact';

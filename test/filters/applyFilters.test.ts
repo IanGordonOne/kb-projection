@@ -139,32 +139,61 @@ describe('applyFilters — prepend/append data filters', () => {
   });
 });
 
-describe('applyFilters — redact code filter', () => {
-  test('redact: light applies the 777westwood-style redaction', () => {
-    const ctx = ctxFor('Host', [{ title: 'Host' }]);
-    const body = 'Cost: $355,000 negotiated with Goodwin family\n';
-    const out = applyFilters(body, [{ redact: 'light' }], ctx);
-    expect(out).toContain('$[REDACTED]');
-    expect(out).toContain('the neighboring family');
-    expect(out).toContain('lightly redacted');
+describe('applyFilters — redact code filter (host-supplied rules)', () => {
+  // Engine ships only `none` as a built-in mode. Tests use a stub
+  // ruleset to verify the orchestrator delegates to applyRedact
+  // correctly. Site-specific patterns belong to host sites, not
+  // the engine.
+  const stubRulesByMode = {
+    'test-mask': {
+      notice: '> **Notice:** stub-redacted.\n\n',
+      rules: [
+        { pattern: /SECRET-NUMBER/g, replacement: '[REDACTED]' },
+        { pattern: /\bAlice\b/g, replacement: '[person]' },
+      ],
+    },
+  };
+
+  test('redact: <host-mode> applies host-supplied rules', () => {
+    const ctx: FilterContext = {
+      ...ctxFor('Host', [{ title: 'Host' }]),
+      redactRulesByMode: stubRulesByMode,
+    };
+    const body = 'Value: SECRET-NUMBER paid to Alice\n';
+    const out = applyFilters(body, [{ redact: 'test-mask' }], ctx);
+    expect(out).toContain('[REDACTED]');
+    expect(out).toContain('[person]');
+    expect(out).toContain('stub-redacted');
+    expect(out).not.toContain('SECRET-NUMBER');
+    expect(out).not.toContain('Alice');
   });
 
-  test('redact: none is a no-op', () => {
+  test('redact: none is a built-in no-op', () => {
     const ctx = ctxFor('Host', [{ title: 'Host' }]);
     const body = 'plain content';
     const out = applyFilters(body, [{ redact: 'none' }], ctx);
     expect(out).toBe(body);
   });
 
+  test('redact: unknown mode (no rulesByMode entry) is a no-op', () => {
+    const ctx = ctxFor('Host', [{ title: 'Host' }]);
+    const body = 'sensitive content';
+    const out = applyFilters(body, [{ redact: 'undefined-mode' }], ctx);
+    expect(out).toBe(body);
+  });
+
   test('redact runs after data splices', () => {
-    makePage('Notice', '- spend $355,000 fee\n');
-    const ctx = ctxFor('Host', [{ title: 'Host' }, { title: 'Notice' }]);
+    makePage('Notice', '- spend SECRET-NUMBER fee\n');
+    const ctx: FilterContext = {
+      ...ctxFor('Host', [{ title: 'Host' }, { title: 'Notice' }]),
+      redactRulesByMode: stubRulesByMode,
+    };
     const out = applyFilters(
       'host body',
-      [{ append: 'Notice' }, { redact: 'light' }],
+      [{ append: 'Notice' }, { redact: 'test-mask' }],
       ctx,
     );
-    expect(out).toContain('$[REDACTED]');
-    expect(out).not.toContain('$355,000');
+    expect(out).toContain('[REDACTED]');
+    expect(out).not.toContain('SECRET-NUMBER');
   });
 });

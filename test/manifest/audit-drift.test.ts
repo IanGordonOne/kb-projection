@@ -332,19 +332,34 @@ describe('auditDrift — filter findings (kyber-3fh.13)', () => {
     expect(cycles).toHaveLength(1);
   });
 
-  test('filter-redact-mode-unknown for an unsupported mode', () => {
+  test('filter-redact-mode-unknown when knownRedactModes provided + mode missing', () => {
     makePage('Host');
     const manifest = {
       graphPath: graph,
       entries: [
-        // bypass the schema (audit accepts the runtime shape directly)
         { title: 'Host', tier: 'seed', filters: [{ redact: 'medium' }] },
+      ],
+    } as unknown as PublishManifest;
+    const report = auditDrift(manifest, {
+      detectCandidates: false,
+      knownRedactModes: ['none', 'light'],
+    });
+    const f = report.findings.find((x) => x.kind === 'filter-redact-mode-unknown');
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe('error');
+  });
+
+  test('filter-redact-mode skipped when knownRedactModes omitted (host-mode trust)', () => {
+    makePage('Host');
+    const manifest = {
+      graphPath: graph,
+      entries: [
+        { title: 'Host', tier: 'seed', filters: [{ redact: 'host-defined' }] },
       ],
     } as unknown as PublishManifest;
     const report = auditDrift(manifest, { detectCandidates: false });
     const f = report.findings.find((x) => x.kind === 'filter-redact-mode-unknown');
-    expect(f).toBeDefined();
-    expect(f!.severity).toBe('error');
+    expect(f).toBeUndefined();
   });
 
   test('filter-redact-conflict when both top-level redact and filters[].redact present', () => {

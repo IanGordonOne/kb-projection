@@ -17,7 +17,7 @@ import type { Loader } from 'astro/loaders';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, extname, join } from 'node:path';
-import { applyFilters, type FilterContext } from '../filters';
+import { applyFilters, type FilterContext, type RedactRules } from '../filters';
 import type { FilterSpec } from '../manifest/schema';
 import {
   escapeHtml,
@@ -86,6 +86,14 @@ export interface KbLoaderOptions {
    * symlink-resolution failures from the lib's filesystem path.
    */
   createProcessor: () => Promise<MarkdownProcessorLike>;
+  /**
+   * Host-supplied redact rules keyed by mode name. The engine ships
+   * only `none` as a built-in (no-op); any other mode (e.g., `light`)
+   * is host-supplied here. Source-clean: no site-specific patterns
+   * live in the engine. Each ruleset is `{ notice?, rules: [{ pattern,
+   * replacement }] }`.
+   */
+  redactRulesByMode?: Record<string, RedactRules>;
 }
 
 /** Publish manifest entry shape — must match the manifest schema. */
@@ -237,6 +245,7 @@ export function createKbLoader(opts: KbLoaderOptions): Loader {
             manifest,
             watchedAdditionPaths: [],
             logger,
+            redactRulesByMode: opts.redactRulesByMode,
           };
           filteredBody = applyFilters(renderBody, entry.filters, filterCtx);
           for (const p of filterCtx.watchedAdditionPaths) watchedPaths.push(p);

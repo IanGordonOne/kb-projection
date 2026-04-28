@@ -203,15 +203,19 @@ export function parseManifest(raw: unknown): ValidationResult {
             );
           } else if (key === 'redact') {
             const v = (f as Record<string, unknown>).redact;
-            if (typeof v !== 'string' || !REDACT_MODE_VALUES.includes(v as RedactMode)) {
+            if (typeof v !== 'string' || v.length === 0) {
               pushErr(
                 errors,
                 `${fpath}.redact`,
-                `redact must be one of ${REDACT_MODE_VALUES.map((r) => `"${r}"`).join(', ')}; got ${JSON.stringify(v)}`
+                `redact mode must be a non-empty string; got ${JSON.stringify(v)}`
               );
               entryValid = false;
               continue;
             }
+            // Mode-name validity is HOST-SUPPLIED via createKbLoader's
+            // `redactRulesByMode` table (the engine ships only `none` as
+            // built-in). cli-audit-drift can additionally check known-mode
+            // membership when invoked with --known-redact-modes.
             filtersHasRedact = true;
             validatedFilters.push({ redact: v as RedactMode });
           } else {
