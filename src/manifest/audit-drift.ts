@@ -83,8 +83,9 @@ const KIND_RANK: Record<DriftFinding['kind'], number> = {
   'filter-redact-mode-unknown': 4,
   'file-title-mismatch': 5,
   'filter-cycle': 6,
-  'unknown-field': 7,
-  'candidate-page': 8,
+  'block-stale-verified': 7,
+  'unknown-field': 8,
+  'candidate-page': 9,
 };
 
 function rankFindings(findings: DriftFinding[]): DriftFinding[] {
@@ -117,6 +118,85 @@ export interface DriftAuditOptions {
    * unknown case at apply time).
    */
   knownRedactModes?: readonly string[];
+  /**
+   * Threshold in days for `block-stale-verified` findings. A `verified::`
+   * date older than this triggers a warning. Default 180. Set to 0 to
+   * disable stale-verified scanning.
+   */
+  staleVerifiedThresholdDays?: number;
+  /**
+   * Override the "now" timestamp used for stale-verified age calculation.
+   * Defaults to `Date.now()`. Useful for deterministic tests and for
+   * "would this be stale as of date X" audits.
+   */
+  nowMs?: number;
+}
+
+/**
+ * Match LogSeq block-property lines like `verified:: [[2026-04-20]]` or
+ * `verified:: 2026-04-20`. The line is indented under its bullet.
+ */
+const VERIFIED_LINE_RE = /^\s*verified::\s*(?:\[\[)?(\d{4}-\d{2}-\d{2})(?:\]\])?\s*$/;
+
+/**
+ * Match a bullet line — `- text`, `\t- text`, etc. Returns the text after the dash.
+ */
+const BULLET_LINE_RE = /^\s*-\s+(.*?)\s*$/;
+
+/**
+ * Scan a LogSeq page for blocks with stale verified:: properties. Returns
+ * one finding per block whose verified date is older than thresholdDays.
+ */
+function scanStaleVerified(
+  filePath: string,
+  title: string,
+  entryIndex: number | undefined,
+  thresholdDays: number,
+  nowMs: number
+): DriftFinding[] {
+  let content: string;
+  try {
+    content = readFileSync(filePath, 'utf8');
+  } catch {
+    return [];
+  }
+  const out: DriftFinding[] = [];
+  const lines = content.split('\n');
+  const thresholdMs = thresholdDays * 86400 * 1000;
+  for (let i = 0; i < lines.length; i++) {
+    const m = VERIFIED_LINE_RE.exec(lines[i]);
+    if (!m) continue;
+    const dateStr = m[1];
+    const verifiedMs = Date.parse(dateStr + 'T00:00:00Z');
+    if (Number.isNaN(verifiedMs)) continue;
+    const ageMs = nowMs - verifiedMs;
+    if (ageMs <= thresholdMs) continue;
+
+    let excerpt = '';
+    for (let j = i - 1; j >= 0 && j >= i - 6; j--) {
+      const bm = BULLET_LINE_RE.exec(lines[j]);
+      if (bm && bm[1].length > 0) {
+        excerpt = bm[1].slice(0, 120);
+        break;
+      }
+    }
+    const ageDays = Math.floor(ageMs / (86400 * 1000));
+    out.push({
+      id: makeId('block-stale-verified', `${title}::${dateStr}::${i}`),
+      kind: 'block-stale-verified',
+      severity: 'warn',
+      message: `Block in "${title}" verified ${ageDays} days ago (${dateStr}); re-verify against source`,
+      ref: {
+        entryIndex,
+        title,
+        file: filePath,
+        blockExcerpt: excerpt || undefined,
+        verifiedDate: dateStr,
+        ageDays,
+      },
+    });
+  }
+  return out;
 }
 
 const KNOWN_ENTRY_FIELDS = new Set([
@@ -148,6 +228,8 @@ export function auditDrift(
   const detectCandidates = options.detectCandidates ?? true;
   const maxCandidates = options.maxCandidates ?? 25;
   const knownRedactModes = options.knownRedactModes;
+  const staleVerifiedThresholdDays = options.staleVerifiedThresholdDays ?? 180;
+  const nowMs = options.nowMs ?? Date.now();
 
   const findings: DriftFinding[] = [];
   const counts: Record<DriftSeverity, number> = { error: 0, warn: 0, info: 0 };
@@ -215,6 +297,21 @@ export function auditDrift(
         ref: { entryIndex: i, title: e.title },
       });
       counts.info += 1;
+    }
+
+    // Pass A.1 — stale-verified scan on this entry's source page.
+    if (staleVerifiedThresholdDays > 0 && !e.exclude) {
+      const staleFindings = scanStaleVerified(
+        resolved,
+        e.title,
+        i,
+        staleVerifiedThresholdDays,
+        nowMs
+      );
+      for (const f of staleFindings) {
+        findings.push(f);
+        counts.warn += 1;
+      }
     }
   }
 

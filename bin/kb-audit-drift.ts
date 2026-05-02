@@ -23,6 +23,7 @@ interface CliArgs {
   hops: number;
   maxCandidates: number;
   detectCandidates: boolean;
+  staleVerifiedThresholdDays: number;
   json: boolean;
 }
 
@@ -31,6 +32,7 @@ function parseArgs(argv: string[]): CliArgs {
     hops: 1,
     maxCandidates: 25,
     detectCandidates: true,
+    staleVerifiedThresholdDays: 180,
     json: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -39,10 +41,12 @@ function parseArgs(argv: string[]): CliArgs {
     else if (a === '--hops') out.hops = parseInt(argv[++i], 10);
     else if (a === '--max-candidates') out.maxCandidates = parseInt(argv[++i], 10);
     else if (a === '--no-candidates') out.detectCandidates = false;
+    else if (a === '--stale-verified-days') out.staleVerifiedThresholdDays = parseInt(argv[++i], 10);
+    else if (a === '--no-stale-verified') out.staleVerifiedThresholdDays = 0;
     else if (a === '--json') out.json = true;
     else if (a === '-h' || a === '--help') {
       process.stderr.write(
-        'Usage: cli-audit-drift.ts <manifest.json> [--graph <path>] [--hops <n>] [--max-candidates <n>] [--no-candidates] [--json]\n'
+        'Usage: cli-audit-drift.ts <manifest.json> [--graph <path>] [--hops <n>] [--max-candidates <n>] [--no-candidates] [--stale-verified-days <n>] [--no-stale-verified] [--json]\n'
       );
       process.exit(2);
     } else if (!out.manifestPath && !a.startsWith('-')) {
@@ -59,6 +63,7 @@ function parseArgs(argv: string[]): CliArgs {
     hops: out.hops ?? 1,
     maxCandidates: out.maxCandidates ?? 25,
     detectCandidates: out.detectCandidates ?? true,
+    staleVerifiedThresholdDays: out.staleVerifiedThresholdDays ?? 180,
     json: out.json ?? false,
   };
 }
@@ -115,6 +120,7 @@ async function main(): Promise<void> {
       hops: args.hops,
       detectCandidates: args.detectCandidates,
       maxCandidates: args.maxCandidates,
+      staleVerifiedThresholdDays: args.staleVerifiedThresholdDays,
     },
     args.graph
   );

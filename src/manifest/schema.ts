@@ -105,7 +105,8 @@ export type DriftFindingKind =
   | 'filter-self-reference'       // entry has a filter that references itself
   | 'filter-cycle'                // mutual or longer cycle in filter references
   | 'filter-redact-mode-unknown'  // redact filter mode is not in the registry
-  | 'filter-redact-conflict';     // entry has both top-level redact and filters[].redact
+  | 'filter-redact-conflict'      // entry has both top-level redact and filters[].redact
+  | 'block-stale-verified';       // a block has verified:: <date> older than staleVerifiedThresholdDays
 
 export interface DriftFinding {
   id: string;               // stable ID (kind + key) so a future dismiss-list works
@@ -113,7 +114,18 @@ export interface DriftFinding {
   severity: DriftSeverity;
   message: string;
   /** The manifest entry index or LogSeq title that triggered this finding. */
-  ref: { entryIndex?: number; title?: string; file?: string; filterIndex?: number };
+  ref: {
+    entryIndex?: number;
+    title?: string;
+    file?: string;
+    filterIndex?: number;
+    /** First non-empty bullet text within or directly preceding a flagged block. */
+    blockExcerpt?: string;
+    /** Verified date as YYYY-MM-DD, when finding kind is block-stale-verified. */
+    verifiedDate?: string;
+    /** Days elapsed since verified date at audit time, when relevant. */
+    ageDays?: number;
+  };
 }
 
 export interface DriftReport {

@@ -416,3 +416,134 @@ describe('auditDrift — finding IDs are stable', () => {
     expect(ids1).toEqual(ids2);
   });
 });
+
+describe('auditDrift — block-stale-verified', () => {
+  // Anchor "now" to a fixed point so date math is deterministic.
+  const NOW = Date.parse('2026-05-01T00:00:00Z');
+
+  test('flags blocks whose verified date is older than threshold', () => {
+    makePage(
+      'Alpha',
+      [
+        '- A claim about §6.2',
+        '  cite:: NFPA 13D §6.2 / https://example / [[2025-01-01]]',
+        '  verified:: [[2025-01-01]]',
+      ].join('\n') + '\n',
+    );
+    const manifest: PublishManifest = {
+      graphPath: graph,
+      entries: [{ title: 'Alpha', tier: 'seed' }],
+    };
+    const report = auditDrift(manifest, {
+      detectCandidates: false,
+      nowMs: NOW,
+      staleVerifiedThresholdDays: 180,
+    });
+    const stale = report.findings.find((f) => f.kind === 'block-stale-verified');
+    expect(stale).toBeDefined();
+    expect(stale!.severity).toBe('warn');
+    expect(stale!.ref.title).toBe('Alpha');
+    expect(stale!.ref.verifiedDate).toBe('2025-01-01');
+    expect(stale!.ref.ageDays).toBeGreaterThan(180);
+    expect(stale!.ref.blockExcerpt).toContain('§6.2');
+    expect(report.counts.warn).toBeGreaterThanOrEqual(1);
+  });
+
+  test('does not flag blocks within threshold', () => {
+    makePage(
+      'Alpha',
+      ['- Recent claim', '  verified:: [[2026-04-01]]'].join('\n') + '\n',
+    );
+    const manifest: PublishManifest = {
+      graphPath: graph,
+      entries: [{ title: 'Alpha', tier: 'seed' }],
+    };
+    const report = auditDrift(manifest, {
+      detectCandidates: false,
+      nowMs: NOW,
+      staleVerifiedThresholdDays: 180,
+    });
+    const stale = report.findings.find((f) => f.kind === 'block-stale-verified');
+    expect(stale).toBeUndefined();
+  });
+
+  test('threshold 0 disables the scan entirely', () => {
+    makePage(
+      'Alpha',
+      ['- Old claim', '  verified:: [[2020-01-01]]'].join('\n') + '\n',
+    );
+    const manifest: PublishManifest = {
+      graphPath: graph,
+      entries: [{ title: 'Alpha', tier: 'seed' }],
+    };
+    const report = auditDrift(manifest, {
+      detectCandidates: false,
+      nowMs: NOW,
+      staleVerifiedThresholdDays: 0,
+    });
+    const stale = report.findings.find((f) => f.kind === 'block-stale-verified');
+    expect(stale).toBeUndefined();
+  });
+
+  test('accepts plain YYYY-MM-DD without [[]] wrapper', () => {
+    makePage(
+      'Alpha',
+      ['- Bare date claim', '  verified:: 2024-01-01'].join('\n') + '\n',
+    );
+    const manifest: PublishManifest = {
+      graphPath: graph,
+      entries: [{ title: 'Alpha', tier: 'seed' }],
+    };
+    const report = auditDrift(manifest, {
+      detectCandidates: false,
+      nowMs: NOW,
+      staleVerifiedThresholdDays: 180,
+    });
+    const stale = report.findings.find((f) => f.kind === 'block-stale-verified');
+    expect(stale).toBeDefined();
+    expect(stale!.ref.verifiedDate).toBe('2024-01-01');
+  });
+
+  test('skips excluded manifest entries', () => {
+    makePage(
+      'Alpha',
+      ['- Old claim', '  verified:: [[2020-01-01]]'].join('\n') + '\n',
+    );
+    const manifest: PublishManifest = {
+      graphPath: graph,
+      entries: [{ title: 'Alpha', tier: 'seed', exclude: true }],
+    };
+    const report = auditDrift(manifest, {
+      detectCandidates: false,
+      nowMs: NOW,
+      staleVerifiedThresholdDays: 180,
+    });
+    const stale = report.findings.find((f) => f.kind === 'block-stale-verified');
+    expect(stale).toBeUndefined();
+  });
+
+  test('multiple stale blocks emit one finding each with stable IDs', () => {
+    makePage(
+      'Alpha',
+      [
+        '- First claim',
+        '  verified:: [[2024-01-01]]',
+        '- Second claim',
+        '  verified:: [[2024-06-01]]',
+      ].join('\n') + '\n',
+    );
+    const manifest: PublishManifest = {
+      graphPath: graph,
+      entries: [{ title: 'Alpha', tier: 'seed' }],
+    };
+    const report = auditDrift(manifest, {
+      detectCandidates: false,
+      nowMs: NOW,
+      staleVerifiedThresholdDays: 180,
+    });
+    const stale = report.findings.filter((f) => f.kind === 'block-stale-verified');
+    expect(stale.length).toBe(2);
+    const ids = new Set(stale.map((f) => f.id));
+    expect(ids.size).toBe(2);
+  });
+});
