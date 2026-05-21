@@ -9,7 +9,7 @@
  * the hydrate-manifest-anchors tool can share the same path-resolution
  * logic as the loader without re-implementing the 5-encoding strategy.
  *
- * Plan: ~/Projects/kyber/Plans/let-s-please-plan-1-6-generic-hanrahan.md (§1.6)
+ * Plan: ~/commons/code/kyber/Plans/let-s-please-plan-1-6-generic-hanrahan.md (§1.6)
  */
 
 import { existsSync } from 'node:fs';
