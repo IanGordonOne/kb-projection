@@ -208,6 +208,13 @@ export function transformBody(
   // 3. Strip {{query ...}} and {{embed ...}} blocks
   out = out.replace(/\{\{\s*(?:query|embed)[\s\S]*?\}\}/g, '');
 
+  // 3b. Rewrite LogSeq asset references (../assets/X, ./assets/X, assets/X) to
+  //     the published absolute path /assets/kb/X, so inline images resolve at
+  //     any page depth (e.g. /kb/<slug>/). Leading-slash paths are left alone.
+  //     Host copies the referenced graph assets into public/assets/kb/ (see the
+  //     consumer's scripts/copy-kb-images.ts, wired to its prebuild hook).
+  out = out.replace(/\]\((?:\.\.?\/)?assets\//g, '](/assets/kb/');
+
   // 4. Normalize bullet-indented headings: "- ## Foo" → "\n## Foo"
   out = out.replace(/^[\s\t]*-\s+(#{1,6}\s+)/gm, '\n$1');
 

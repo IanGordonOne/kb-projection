@@ -1,6 +1,6 @@
 {
   "name": "@kyber/kb-projection",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "LogSeq → Astro projection engine: transforms, content loader, manifest editor, filter pipeline.",
   "type": "module",
   "license": "MIT",
@@ -8,6 +8,7 @@
   "exports": {
     ".": "./src/lib/logseqToAstro.ts",
     "./loader": "./src/lib/loader.ts",
+    "./collection": "./src/lib/collection.ts",
     "./filters": "./src/filters/index.ts",
     "./manifest": "./src/manifest/schema.ts",
     "./manifest/validate": "./src/manifest/validate.ts",

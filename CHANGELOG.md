@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `src/lib/collection.ts` — `createKbCollection` helper, exported as `@kyber/kb-projection/collection`. Folds the two pieces of per-site boilerplate (the `loaders/kb.ts` loader shell + the `config.ts` `defineCollection`/schema declaration) into a single engine call. Host injects `defineCollection` + `z` (virtual-module constraint, same rationale as `createProcessor`). Default `defaultKbSchema` mirrors 777westwood's hand-written schema; override via the optional `schema` builder. Behavior-preserving extraction (kyber-3fh.15).
+
+## v0.3.0 — 2026-05-02
+
+### Added
+
+- `src/manifest/audit-drift.ts` — `block-stale-verified` detection for the `cite::` / `verified::` provenance convention. Surfaces blocks whose `verified::` date is older than 180 days. (Version bump was tagged `v0.3.0` at the time but the `package.json` field lagged at `0.2.0`; reconciled here.)
+- `src/manifest/schema.ts` — schema support for the `cite::` / `verified::` block-property convention.
+
 ## v0.2.0 — 2026-04-28
 
 ### Removed

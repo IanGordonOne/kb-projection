@@ -105,6 +105,13 @@ interface PublishEntry {
   redact?: string;
   file?: string;
   /**
+   * Provenance class from the vault (fact | provision | strategy). Surfaced
+   * into entry data so the render layer can fence `strategy` with a
+   * "not a county determination" banner (INTENT invariant #5). Set by
+   * grounded-manifest.ts; absent for hand-authored/legacy manifests.
+   */
+  provClass?: string;
+  /**
    * kyber-3fh.13 (perky-tarsier) — per-entry filter pipeline applied
    * between hydration-cache substitution and transformBody. See
    * `Tools/filters/` and the manifest schema FilterSpec.
@@ -277,6 +284,7 @@ export function createKbLoader(opts: KbLoaderOptions): Loader {
         if (props.related) dataIn.related = props.related;
         if (props.tags) dataIn.pageTags = props.tags;
         if (entry.backlinks && entry.backlinks.length > 0) dataIn.backlinks = entry.backlinks;
+        if (entry.provClass) dataIn.provClass = entry.provClass;
 
         const data = await parseData({ id: slug, data: dataIn });
         const rendered = await processor.render(transformed);
