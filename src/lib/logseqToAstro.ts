@@ -12,8 +12,8 @@
  * Plan: ~/commons/code/kyber/Plans/let-s-please-plan-1-6-generic-hanrahan.md (§1.6)
  */
 
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 /**
  * Minimal entry shape needed by the transform helpers. Mirrors a subset of
@@ -176,6 +176,67 @@ export function buildFrontmatter(
   return fm.join('\n');
 }
 
+const MARKDOWN_IMAGE_EMBED_RE = /!\[[^\]]*]\(([^)\s]+)\)/g;
+const LOCAL_ASSET_REF_RE = /^(?:(?:\.\.|\.)\/)*assets\/.+/;
+
+/**
+ * Extract unique asset basenames from markdown image embeds that point at the
+ * graph's local assets/ directory. Absolute /assets/... and remote refs are
+ * intentionally ignored; only LogSeq-relative graph asset refs are carried
+ * through into the published site.
+ */
+export function extractReferencedAssets(body: string): string[] {
+  const assets = new Set<string>();
+  let match: RegExpExecArray | null;
+
+  while ((match = MARKDOWN_IMAGE_EMBED_RE.exec(body)) !== null) {
+    const ref = match[1].trim();
+    if (/^https?:\/\//i.test(ref)) continue;
+    if (ref.startsWith('/')) continue;
+    if (!LOCAL_ASSET_REF_RE.test(ref)) continue;
+    const file = basename(ref);
+    if (file) assets.add(file);
+  }
+
+  return [...assets];
+}
+
+/**
+ * Copy graph-local assets referenced by projected page bodies into a published
+ * site's public assets directory. Missing source files warn and are skipped so
+ * page projection never fails on a stale asset reference.
+ */
+export function copyReferencedAssets(args: {
+  graphDir: string;
+  pageBodies: string[];
+  targetPublicAssetsDir: string;
+}): { copied: string[]; missing: string[] } {
+  const wanted = [...new Set(args.pageBodies.flatMap(extractReferencedAssets))].sort();
+  if (wanted.length === 0) {
+    return { copied: [], missing: [] };
+  }
+
+  mkdirSync(args.targetPublicAssetsDir, { recursive: true });
+
+  const copied: string[] = [];
+  const missing: string[] = [];
+  for (const file of wanted) {
+    const sourcePath = join(args.graphDir, 'assets', file);
+    if (!existsSync(sourcePath)) {
+      console.warn(`logseqToAstro: missing asset ${sourcePath}; skipping copy`);
+      missing.push(file);
+      continue;
+    }
+    copyFileSync(sourcePath, join(args.targetPublicAssetsDir, file));
+    copied.push(file);
+  }
+
+  return {
+    copied: copied.sort(),
+    missing: missing.sort(),
+  };
+}
+
 /**
  * Body transform — strip LogSeq syntax, dedent implicit-root indentation,
  * rewrite wikilinks to Astro routes (or unresolved spans). Pure / idempotent.
@@ -213,7 +274,7 @@ export function transformBody(
   //     any page depth (e.g. /kb/<slug>/). Leading-slash paths are left alone.
   //     Host copies the referenced graph assets into public/assets/kb/ (see the
   //     consumer's scripts/copy-kb-images.ts, wired to its prebuild hook).
-  out = out.replace(/\]\((?:\.\.?\/)?assets\//g, '](/assets/kb/');
+  out = out.replace(/\]\((?:(?:\.\.|\.)\/)*assets\//g, '](/assets/kb/');
 
   // 4. Normalize bullet-indented headings: "- ## Foo" → "\n## Foo"
   out = out.replace(/^[\s\t]*-\s+(#{1,6}\s+)/gm, '\n$1');
