@@ -12,6 +12,8 @@ import { join } from 'node:path';
 import {
   copyReferencedAssets,
   extractReferencedAssets,
+  parseProperties,
+  stripLeadingPropertyBlock,
 } from '../../src/lib/logseqToAstro';
 
 describe('extractReferencedAssets', () => {
@@ -114,5 +116,34 @@ describe('copyReferencedAssets', () => {
       rmSync(graphDir, { recursive: true, force: true });
       rmSync(targetDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('leading property block — underscored keys', () => {
+  // Regression: PROMOTE writes keys like `source_session::`. The property-line
+  // regex must allow `_`, else the scan stops at that line and leaks it (plus
+  // every property after it) into the rendered body.
+  const page = [
+    'title:: Example Page',
+    'type:: knowledge',
+    'source_session:: 9fbceec8-9436-4947-badc-0c46c503e9a2',
+    'created:: 2026-06-22',
+    'last-updated:: 2026-06-22',
+    '',
+    'Body starts here.',
+  ].join('\n');
+
+  test('stripLeadingPropertyBlock removes the entire block, including underscored keys', () => {
+    const body = stripLeadingPropertyBlock(page);
+    expect(body).toBe('Body starts here.');
+    expect(body).not.toContain('source_session::');
+    expect(body).not.toContain('last-updated::');
+  });
+
+  test('parseProperties captures underscored keys and returns clean body', () => {
+    const { props, body } = parseProperties(page);
+    expect(props.source_session).toBe('9fbceec8-9436-4947-badc-0c46c503e9a2');
+    expect(props['last-updated']).toBe('2026-06-22');
+    expect(body.trim()).toBe('Body starts here.');
   });
 });

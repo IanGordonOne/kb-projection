@@ -103,7 +103,10 @@ export function escapeHtml(s: string): string {
  * via `renderTopicMarkdown`); we only want the body when splicing into
  * a published page that already carries the anchor's own properties.
  */
-const PROPERTY_LINE_RE = /^[a-z][a-z0-9-]*::/;
+// NOTE: allow `_` in property keys — LogSeq/PROMOTE write underscored keys like
+// `source_session::`. Without `_`, the leading-property-block scan stops at the
+// first underscored key and leaks it (plus everything after) into the rendered body.
+const PROPERTY_LINE_RE = /^[a-z][a-z0-9_-]*::/;
 
 export function stripLeadingPropertyBlock(content: string): string {
   const lines = content.split('\n');
@@ -127,7 +130,7 @@ export function parseProperties(content: string): {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    const m = line.match(/^([a-z0-9-]+)::\s*(.+)$/i);
+    const m = line.match(/^([a-z0-9_-]+)::\s*(.+)$/i);
     if (m) {
       props[m[1]] = m[2].trim();
       i++;
