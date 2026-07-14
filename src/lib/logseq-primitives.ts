@@ -36,16 +36,20 @@ export const WIKILINK_RE = /\[\[([^\[\]\|]+?)(?:\|[^\]]+)?\]\]/g;
  * manifest path or the lib path touches it.
  */
 export function decodeHtml(s: string): string {
+  // `&amp;` MUST decode LAST so a composed entity like `&amp;lt;` (the encoding
+  // of the literal text `&lt;`) decodes to `&lt;`, not `<`. Decoding `&amp;`
+  // first would synthesize a fresh `&lt;` for the named-entity pass to eat —
+  // a double-decode (bd kb-projection-gkf).
   return s
     .replace(/&sect;/g, '§')
     .replace(/&mdash;/g, '—')
     .replace(/&ndash;/g, '–')
-    .replace(/&amp;/g, '&')
     .replace(/&nbsp;/g, ' ')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&middot;/g, '·')
-    .replace(/&hellip;/g, '…');
+    .replace(/&hellip;/g, '…')
+    .replace(/&amp;/g, '&');
 }
 
 /** Minimal HTML escape for attribute / text content composed in the loader. */

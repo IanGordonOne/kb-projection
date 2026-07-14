@@ -27,6 +27,14 @@ describe('decodeHtml (canonical superset)', () => {
   test('decodes the superset entities (&nbsp; &lt; &gt; &middot; &hellip;)', () => {
     expect(decodeHtml('A &lt; B &gt; C &nbsp;D &middot; E &hellip;')).toBe('A < B > C  D · E …');
   });
+  // bd kb-projection-gkf — `&amp;` decodes LAST, so composed entities decode one
+  // level only (no double-decode).
+  test('does not double-decode composed entities (&amp; last)', () => {
+    expect(decodeHtml('&amp;lt;')).toBe('&lt;'); // encoding of literal "&lt;"
+    expect(decodeHtml('&amp;amp;')).toBe('&amp;'); // encoding of literal "&amp;"
+    expect(decodeHtml('Tom &amp; Jerry')).toBe('Tom & Jerry'); // plain ampersand still decodes
+    expect(decodeHtml('&amp;sect;')).toBe('&sect;'); // encoded entity name stays literal
+  });
 });
 
 describe('extractWikilinks', () => {
