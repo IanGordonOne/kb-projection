@@ -26,18 +26,36 @@ const expand = (p: string) => p.replace(/^~(?=$|\/)/, process.env.HOME ?? '~');
 const graphDir = expand(arg('graph') ?? `${process.env.HOME}/Logseq/MyGraph`);
 const vaultDir = arg('vault');
 const pagesFile = arg('pages');
-if (!vaultDir || !pagesFile) {
-  console.error('error: --vault <dir> and --pages <json> are required');
+const seedsArg = arg('seeds'); // semicolon-separated (titles may contain commas)
+if (!vaultDir || (!pagesFile && !seedsArg)) {
+  console.error('error: --vault <dir> AND one of --pages <json> | --seeds "A;B;C" are required');
   process.exit(2);
 }
-const pages = JSON.parse(readFileSync(expand(pagesFile), 'utf8')).map(
-  (p: { title: string; file?: string; group?: string; tier?: string }) => ({ tier: p.tier ?? 'projected', ...p }),
-);
+
+const pages = pagesFile
+  ? JSON.parse(readFileSync(expand(pagesFile), 'utf8')).map(
+      (p: { title: string; file?: string; group?: string; tier?: string }) => ({ tier: p.tier ?? 'projected', ...p }),
+    )
+  : undefined;
+
+const num = (n?: string) => (n ? Number(n) : undefined);
+const select = seedsArg
+  ? {
+      seeds: seedsArg.split(';').map((s) => s.trim()).filter(Boolean),
+      maxPages: num(arg('max-pages')),
+      maxHops: num(arg('max-hops')),
+      hubOutdegree: num(arg('hub-outdegree')),
+      minScore: num(arg('min-score')),
+    }
+  : undefined;
 
 const input: ObsidianProjectionInput = {
   graphDir,
   vaultDir: expand(vaultDir),
   pages,
+  select,
+  stubs: has('stubs'),
+  stubMinRefs: num(arg('stub-min-refs')),
   vaultSubfolder: arg('subfolder'),
   moc: arg('moc') ? { title: arg('moc')! } : undefined,
   apply: has('apply'),
@@ -47,7 +65,9 @@ const r = projectToObsidian(input);
 
 const missing = r.pages.filter((p) => p.missing);
 console.log(`${r.applied ? 'WROTE' : 'DRY-RUN (pass --apply to write)'} → ${r.vaultDir}`);
+if (select) console.log(`  mode: auto-select from ${select.seeds.length} seed(s)`);
 console.log(`  pages: ${r.pages.length - missing.length}/${r.pages.length}${missing.length ? ` (MISSING: ${missing.map((m) => m.title).join(', ')})` : ''}`);
 console.log(`  assets: ${r.assets.copied.length} copied${r.assets.missing.length ? `, ${r.assets.missing.length} missing` : ''}`);
 if (r.moc) console.log(`  + MOC`);
+if (r.boundary) console.log(`  boundary: ${r.boundary.length} out-of-slice link(s)${input.stubs ? ` → ${r.stubsWritten} stub(s)` : ' (pass --stubs to emit graceful placeholders)'}`);
 if (!r.applied) console.log(`  (nothing written — re-run with --apply)`);

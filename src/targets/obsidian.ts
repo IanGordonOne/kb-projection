@@ -31,6 +31,7 @@ import {
   resolveLogseqPath,
   type ManifestEntry,
 } from '../lib/logseqToAstro';
+import { selectSubgraph, type BoundaryLink, type SelectOpts } from '../lib/subgraph';
 
 // ---------------------------------------------------------------------------
 // Title / filename sanitizing
@@ -263,8 +264,17 @@ export interface ObsidianProjectionInput {
   graphDir: string;
   /** Target Obsidian vault dir. */
   vaultDir: string;
-  /** Pages to project (title, optional file override, optional group for the MOC). */
-  pages: Array<ManifestEntry & { group?: string }>;
+  /**
+   * Explicit pages to project. If omitted/empty and `select` is given, the
+   * pages are auto-selected as a relevance-scored N-hop subgraph from seeds.
+   */
+  pages?: Array<ManifestEntry & { group?: string }>;
+  /** Auto-select the subgraph from seed titles instead of an explicit list. */
+  select?: Omit<SelectOpts, 'graphDir'>;
+  /** Emit graceful boundary stubs for out-of-slice links (default: off). */
+  stubs?: boolean;
+  /** Only stub boundary links referenced by ≥ this many slice pages. Default 2. */
+  stubMinRefs?: number;
   /** Subfolder inside the vault to write pages into (default: root). */
   vaultSubfolder?: string;
   /** Emit a Map-of-Content index page. */
@@ -279,6 +289,9 @@ export interface ObsidianProjectionResult {
   pages: Array<{ title: string; vaultFile: string; missing?: boolean }>;
   assets: { copied: string[]; missing: string[] };
   moc?: string;
+  /** When auto-selected: the boundary links (out-of-slice) + stub count. */
+  boundary?: BoundaryLink[];
+  stubsWritten?: number;
 }
 
 /** Project a curated subgraph into an Obsidian vault. Dry-run unless apply. */
@@ -289,9 +302,22 @@ export function projectToObsidian(input: ObsidianProjectionInput): ObsidianProje
     : input.vaultDir;
   const assetsDir = join(input.vaultDir, 'assets');
 
+  // Resolve the page set: explicit list, or auto-select an N-hop subgraph.
+  let boundary: BoundaryLink[] | undefined;
+  let pages: Array<ManifestEntry & { group?: string }>;
+  if (input.pages && input.pages.length > 0) {
+    pages = input.pages;
+  } else if (input.select) {
+    const sel = selectSubgraph({ graphDir: input.graphDir, ...input.select });
+    boundary = sel.boundary;
+    pages = sel.pages.map((p) => ({ title: p.title, file: p.file, tier: 'projected', group: `hop-${p.hop}` }));
+  } else {
+    pages = [];
+  }
+
   // titleMap: original title → sanitized (only when they differ).
   const titleMap = new Map<string, string>();
-  for (const p of input.pages) {
+  for (const p of pages) {
     const s = sanitizeObsidianTitle(p.title);
     if (s !== p.title) titleMap.set(p.title, s);
   }
@@ -300,7 +326,7 @@ export function projectToObsidian(input: ObsidianProjectionInput): ObsidianProje
   const bodies: string[] = [];
   const perGroup: Record<string, string[]> = {};
 
-  for (const entry of input.pages) {
+  for (const entry of pages) {
     const src = resolveLogseqPath(entry, graphPages);
     const vaultFile = `${sanitizeObsidianTitle(entry.title)}.md`;
     if (!src) {
@@ -363,11 +389,44 @@ export function projectToObsidian(input: ObsidianProjectionInput): ObsidianProje
     }
   }
 
+  // Boundary stubs: graceful placeholders for out-of-slice links.
+  let stubsWritten = 0;
+  if (input.stubs && boundary) {
+    const minRefs = input.stubMinRefs ?? 2;
+    for (const b of boundary) {
+      if (b.referencedBy.length < minRefs) continue; // skip one-off boundary mentions
+      const name = sanitizeObsidianTitle(b.title);
+      const refs = b.referencedBy.map((r) => `[[${sanitizeObsidianTitle(r)}]]`).join(', ');
+      const note = b.exists
+        ? 'This page exists in the LogSeq graph but is outside this projected slice — widen the slice to include it.'
+        : 'No dedicated page exists for this concept in the graph yet.';
+      const stub = [
+        '---',
+        `title: ${yamlStr(b.title)}`,
+        'type: "stub"',
+        'projected_from: "LogSeq (SSOT) via @kyber/kb-projection"',
+        '---',
+        '',
+        '> [!note] Boundary stub — outside this projected slice',
+        `> Referenced by ${refs || '(the slice)'}.`,
+        `> ${note}`,
+        '',
+      ].join('\n');
+      if (input.apply) {
+        mkdirSync(outDir, { recursive: true });
+        writeFileSync(join(outDir, `${name}.md`), stub);
+      }
+      stubsWritten++;
+    }
+  }
+
   return {
     vaultDir: input.vaultDir,
     applied: !!input.apply,
     pages: pagesOut,
     assets: { copied, missing },
     moc: mocText,
+    boundary,
+    stubsWritten,
   };
 }
