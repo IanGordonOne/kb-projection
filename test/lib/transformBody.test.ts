@@ -18,8 +18,8 @@ import { transformBody } from '../../src/lib/logseqToAstro';
 const NO_SLUGS = new Set<string>();
 const NO_MAP = new Map<string, string>();
 
-describe('transformBody — step 1: strip LogSeq-only lines', () => {
-  test('drops collapsed::, id:: <uuid>, and logseq.*:: lines', () => {
+describe('transformBody — step 1: LogSeq block properties', () => {
+  test('drops collapsed:: and logseq.*::; converts id:: to a data-block-id marker on its block', () => {
     const input = [
       'Real content',
       'collapsed:: true',
@@ -27,12 +27,30 @@ describe('transformBody — step 1: strip LogSeq-only lines', () => {
       'logseq.order-list-type:: number',
       'More content',
     ].join('\n');
-    expect(transformBody(input, NO_SLUGS, NO_MAP)).toBe('Real content\nMore content');
+    // id:: is a property of the "Real content" block → marker appended there;
+    // collapsed:: / logseq.*:: are editor-only state → still stripped.
+    expect(transformBody(input, NO_SLUGS, NO_MAP)).toBe(
+      'Real content <span data-block-id="64fa1234-5678-9abc-def0-123456789abc"></span>\nMore content',
+    );
   });
 
-  test('keeps ordinary key:: value property lines (only the three markers are stripped)', () => {
+  test('keeps ordinary key:: value property lines (collapsed/logseq/id are the only special cases)', () => {
     const input = 'type:: note\nkept content';
     expect(transformBody(input, NO_SLUGS, NO_MAP)).toBe('type:: note\nkept content');
+  });
+
+  test('id:: attaches to the block content line, skipping intervening kept property lines', () => {
+    // In LogSeq all three properties belong to the "Some block" block; the
+    // block-id must address the content line, not the type:: property line.
+    const input = 'Some block\ntype:: note\nid:: aaaa1111-bbbb-2222-cccc-333344445555';
+    expect(transformBody(input, NO_SLUGS, NO_MAP)).toBe(
+      'Some block <span data-block-id="aaaa1111-bbbb-2222-cccc-333344445555"></span>\ntype:: note',
+    );
+  });
+
+  test('a stray id:: with no preceding content line has nothing to address and is dropped', () => {
+    const input = 'id:: dead0000-0000-0000-0000-000000000000\nfirst content';
+    expect(transformBody(input, NO_SLUGS, NO_MAP)).toBe('first content');
   });
 });
 
@@ -142,7 +160,9 @@ describe('transformBody — integration: a representative LogSeq page', () => {
     const map = new Map([['Foo Bar', 'foo-bar']]);
     expect(transformBody(input, published, map)).toBe(
       [
-        '## Overview',
+        // id:: was a property of the "## Overview" block → its marker rides on
+        // the (bullet-normalized) heading line.
+        '## Overview <span data-block-id="64fa1234-5678-9abc-def0-123456789abc"></span>',
         'This links to [Foo Bar](/kb/foo-bar/) and <span class="kb-unresolved" title="Not published">Missing</span>.',
         '![diagram](/assets/kb/d.png)',
       ].join('\n'),

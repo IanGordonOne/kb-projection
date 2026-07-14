@@ -174,10 +174,9 @@ export function copyReferencedAssets(args: {
  * byte-equivalent to the legacy 2026-04-18 transform-kb.ts pipeline via
  * kyber/scripts/regression/777westwood-astro.ts — but that regression (and the
  * legacy/ baseline it diffed against) was RETIRED in v0.2.0, so it is no longer
- * re-runnable. There is currently NO automated coverage of this function: treat
- * any change to it as unguarded and add snapshot coverage first (bd
- * kb-projection-s6h), which is the standing precondition for bd
- * kb-projection-nk3.1.
+ * re-runnable. Its standing guardrail is now the golden-file suite in
+ * test/lib/transformBody.test.ts (bd kb-projection-s6h): any change to this
+ * function must be reflected there as an explicit before/after diff.
  */
 export function transformBody(
   body: string,
@@ -186,16 +185,39 @@ export function transformBody(
 ): string {
   let out = body;
 
-  // 1. Strip LogSeq-specific lines
-  out = out
-    .split('\n')
-    .filter((line) => {
-      if (/^\s*collapsed::\s*(true|false)\s*$/i.test(line)) return false;
-      if (/^\s*id::\s*[0-9a-f-]+\s*$/i.test(line)) return false;
-      if (/^\s*logseq\.[a-z-]+::/i.test(line)) return false;
-      return true;
-    })
-    .join('\n');
+  // 1. Handle LogSeq block properties.
+  //    - `id:: <uuid>` is a block property that addresses the block it lives
+  //      under. Rather than discarding it, emit it as an inline
+  //      `<span data-block-id="<uuid>">` marker appended to that block's content
+  //      line, so each rendered piece is addressable by the edit-mode UI (bd
+  //      kb-projection-nk3.1). The marker is inline HTML that survives vanilla
+  //      markdown rendering without suppressing markdown inside the block (a raw
+  //      block-level `<p>` wrapper would). The block a property belongs to is the
+  //      nearest preceding non-blank, non-property content line.
+  //    - `collapsed::` and `logseq.*::` are editor-only state; still stripped.
+  {
+    const kept: string[] = [];
+    let lastContentIdx = -1;
+    const isProperty = (line: string) => /^\s*[A-Za-z0-9_.-]+::\s/.test(line);
+    for (const line of out.split('\n')) {
+      if (/^\s*collapsed::\s*(true|false)\s*$/i.test(line)) continue;
+      if (/^\s*logseq\.[a-z-]+::/i.test(line)) continue;
+      const idMatch = line.match(/^\s*id::\s*([0-9a-f-]+)\s*$/i);
+      if (idMatch) {
+        // Attach to the block's content line; a stray id with no preceding
+        // content line (malformed LogSeq) has nothing to address, so drop it.
+        if (lastContentIdx >= 0) {
+          kept[lastContentIdx] += ` <span data-block-id="${idMatch[1]}"></span>`;
+        }
+        continue;
+      }
+      kept.push(line);
+      if (line.trim() !== '' && !isProperty(line)) {
+        lastContentIdx = kept.length - 1;
+      }
+    }
+    out = kept.join('\n');
+  }
 
   // 2. Strip block refs ((uuid)) entirely (including whitespace around them)
   out = out.replace(/\s*\(\([0-9a-f-]{20,}\)\)\s*/g, '');
