@@ -1,0 +1,25 @@
+# vigía config for the kb-projection repo (TypeScript / bun).
+# LogSeq → Astro knowledge-base projection engine (@kyber/kb-projection).
+# Place at .beads/afk-config.yaml. See ~/commons/code/vigia/README.md.
+version: 1
+
+# Completion classifier — afk-pick runs these in the worktree to gate HOOKED.
+# `bun run test` routes through the package.json "test" script (currently
+# `bun test`) rather than the raw builtin, so if the script ever gains a
+# path filter the gate follows it — and it sidesteps the full-corpus teardown
+# segfault that bit kyber's raw-`bun test` gate (bd afk-gate-bun-test-segfault).
+# `bun run typecheck` is `tsc --noEmit` — this library's natural vet step.
+test_command: "bun run test"
+vet_command:  "bun run typecheck"
+
+# TDD hook — what counts as "source needing tests" vs "a test file".
+# This package is pure .ts (no .tsx); test files are *.test.ts under test/.
+source_pattern_regex: '\.ts$'
+test_pattern_regex:   '\.test\.ts$'
+
+# Surfaced in the agent prompt + TDD hook error messages.
+language_label:    "TypeScript"
+test_pair_example: "Stage a *.test.ts file in the same commit as the implementation (e.g. src/lib/foo.ts paired with test/lib/foo.test.ts)"
+
+# Worktree dir + launchd label use this. Defaults to basename of repo root if unset.
+repo_short_name: "kb-projection"
