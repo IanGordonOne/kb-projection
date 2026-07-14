@@ -12,11 +12,14 @@
  * Both layers are reused by audit-drift.ts. The full pipeline lives in
  * validateManifest(rawJson, graphPath?).
  *
- * No external deps — matches the existing _KNOWLEDGE_PROJECT/Tools style.
+ * No external deps. The title→file 5-encoding resolver lives in
+ * `../lib/logseq-primitives.ts` and is IMPORTED here (resolveEntryFile is the
+ * adapter over it) — do not re-inline it (bd kb-projection-dt7).
  */
 
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { resolveTitleToPage } from '../lib/logseq-primitives';
 import {
   REDACT_MODE_VALUES,
   REDACT_VALUES,
@@ -301,24 +304,9 @@ export function resolveEntryFile(
   graphPath: string,
   entry: Pick<PublishEntry, 'title' | 'file'>
 ): string | null {
-  const pagesDir = join(graphPath, 'pages');
-  if (entry.file) {
-    const explicit = join(pagesDir, entry.file);
-    if (existsSync(explicit)) return explicit;
-    return null;
-  }
-  const candidates = [
-    entry.title,
-    entry.title.replace(/\//g, '___'),
-    entry.title.replace(/:/g, '%3A'),
-    entry.title.replace(/\?/g, '%3F'),
-    entry.title.replace(/"/g, '%22'),
-  ];
-  for (const c of candidates) {
-    const p = join(pagesDir, c + '.md');
-    if (existsSync(p)) return p;
-  }
-  return null;
+  // The 5-encoding candidate probe lives in the shared primitives module;
+  // this stays the (graphPath, entry)-shaped adapter its callers expect.
+  return resolveTitleToPage(join(graphPath, 'pages'), entry.title, entry.file);
 }
 
 /**

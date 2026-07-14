@@ -15,6 +15,28 @@
 import { copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
+// LogSeq primitives live in ONE place (bd kb-projection-dt7). These are
+// re-exported here so this file's public package API is unchanged, and used
+// internally by transformBody (decodeHtml, slugify) below. Do not re-inline them.
+import {
+  decodeHtml,
+  escapeHtml,
+  parseProperties,
+  resolveTitleToPage,
+  slugify,
+  stripLeadingPropertyBlock,
+  WIKILINK_RE,
+} from './logseq-primitives';
+
+export {
+  decodeHtml,
+  escapeHtml,
+  parseProperties,
+  slugify,
+  stripLeadingPropertyBlock,
+  WIKILINK_RE,
+};
+
 /**
  * Minimal entry shape needed by the transform helpers. Mirrors a subset of
  * SubgraphManifest's ManifestEntry from ../transformer.ts but inlined so this
@@ -45,105 +67,9 @@ export function resolveLogseqPath(
   entry: ManifestEntry,
   graphPages: string,
 ): string | null {
-  if (entry.file) {
-    const p = join(graphPages, entry.file);
-    return existsSync(p) ? p : null;
-  }
-  const candidates = [
-    entry.title,
-    entry.title.replace(/\//g, '___'),
-    entry.title.replace(/:/g, '%3A'),
-    entry.title.replace(/\?/g, '%3F'),
-    entry.title.replace(/"/g, '%22'),
-  ];
-  for (const c of candidates) {
-    const p = join(graphPages, c + '.md');
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
-
-/** Lossy slug — must match the 777westwood-baseline implementation byte-for-byte. */
-export function slugify(title: string): string {
-  return title
-    .toLowerCase()
-    .normalize('NFKD')
-    .replace(/§/g, 'section')
-    .replace(/[^\w\s-]/g, '')
-    .replace(/\s+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80);
-}
-
-export function decodeHtml(s: string): string {
-  return s
-    .replace(/&sect;/g, '§')
-    .replace(/&mdash;/g, '—')
-    .replace(/&ndash;/g, '–')
-    .replace(/&amp;/g, '&');
-}
-
-/** Minimal HTML escape for attribute / text content composed in the loader. */
-export function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-/**
- * Strip the leading LogSeq `key:: value` property block from content,
- * returning only the body. If there is no leading property block (content
- * starts with prose, a heading, or a bullet), returns content unchanged.
- *
- * Used by the loader's hydration-cache path: cache files are raw TG
- * documents that may carry their own property header (CAPTURE writes one
- * via `renderTopicMarkdown`); we only want the body when splicing into
- * a published page that already carries the anchor's own properties.
- */
-// NOTE: allow `_` in property keys — LogSeq/PROMOTE write underscored keys like
-// `source_session::`. Without `_`, the leading-property-block scan stops at the
-// first underscored key and leaks it (plus everything after) into the rendered body.
-const PROPERTY_LINE_RE = /^[a-z][a-z0-9_-]*::/;
-
-export function stripLeadingPropertyBlock(content: string): string {
-  const lines = content.split('\n');
-  let i = 0;
-  while (i < lines.length && lines[i].trim() === '') i++;
-  if (i >= lines.length || !PROPERTY_LINE_RE.test(lines[i])) {
-    return content;
-  }
-  while (i < lines.length && PROPERTY_LINE_RE.test(lines[i])) i++;
-  while (i < lines.length && lines[i].trim() === '') i++;
-  return lines.slice(i).join('\n');
-}
-
-/** Parse leading LogSeq `key:: value` lines into a property bag + remaining body. */
-export function parseProperties(content: string): {
-  props: Record<string, string>;
-  body: string;
-} {
-  const lines = content.split('\n');
-  const props: Record<string, string> = {};
-  let i = 0;
-  while (i < lines.length) {
-    const line = lines[i];
-    const m = line.match(/^([a-z0-9_-]+)::\s*(.+)$/i);
-    if (m) {
-      props[m[1]] = m[2].trim();
-      i++;
-    } else if (line.trim() === '' && Object.keys(props).length > 0) {
-      i++;
-      break;
-    } else if (Object.keys(props).length === 0 && line.trim() === '') {
-      i++;
-    } else {
-      break;
-    }
-  }
-  return { props, body: lines.slice(i).join('\n') };
+  // Path resolution (incl. the 5-encoding candidate list) lives in the shared
+  // primitives module; resolveLogseqPath is the entry-shaped adapter over it.
+  return resolveTitleToPage(graphPages, entry.title, entry.file);
 }
 
 /** Compose YAML frontmatter from manifest entry + parsed properties. Matches sync-kb.ts byte order. */

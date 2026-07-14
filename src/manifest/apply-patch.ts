@@ -104,7 +104,11 @@ function atomicWrite(path: string, content: string): void {
   renameSync(tmp, path);
 }
 
-function slugify(s: string): string {
+// NOT the canonical logseqToAstro/slugify (which is byte-pinned to route slugs).
+// This builds a human-readable fragment for a unique `bd remember` memo key
+// only — deliberately a different, simpler function. Named distinctly so it can
+// never be mistaken for the route slugifier (bd kb-projection-dt7).
+function memoryKeySlug(s: string): string {
   return s
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -126,7 +130,7 @@ function rememberRationale(
       ? `manifest set: "${change.title}"`
       : `manifest unset: "${change.title}"`;
   const body = `${summary}\n\nRationale: ${change.rationale}\n\nManifest: ${manifestPath}`;
-  const key = `manifest-edit-${change.op}-${slugify(change.title)}-${Date.now()}`;
+  const key = `manifest-edit-${change.op}-${memoryKeySlug(change.title)}-${Date.now()}`;
 
   try {
     execSync(`bd remember ${JSON.stringify(body)} --key ${JSON.stringify(key)}`, {

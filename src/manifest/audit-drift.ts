@@ -10,7 +10,9 @@
  * anti-pattern; the audit obeys that with severity tiers and a deterministic
  * sort order.
  *
- * Zero-dep — matches the existing _KNOWLEDGE_PROJECT/Tools style.
+ * No external deps. Shared LogSeq primitives (decodeHtml, wikilink extraction,
+ * the title→file 5-encoding resolver) live in `../lib/logseq-primitives.ts` and
+ * are IMPORTED here — do not re-inline them (bd kb-projection-dt7).
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -25,49 +27,8 @@ import {
   type PublishManifest,
   type RedactMode,
 } from './schema';
+import { extractWikilinks } from '../lib/logseq-primitives';
 import { resolveEntryFile } from './validate';
-
-const WIKILINK_RE = /\[\[([^\[\]\|]+?)(?:\|[^\]]+)?\]\]/g;
-
-function decodeHtml(s: string): string {
-  return s
-    .replace(/&sect;/g, '§')
-    .replace(/&mdash;/g, '—')
-    .replace(/&ndash;/g, '–')
-    .replace(/&amp;/g, '&')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&middot;/g, '·')
-    .replace(/&hellip;/g, '…');
-}
-
-function extractWikilinks(content: string): Set<string> {
-  const found = new Set<string>();
-  let m: RegExpExecArray | null;
-  WIKILINK_RE.lastIndex = 0;
-  while ((m = WIKILINK_RE.exec(content)) !== null) {
-    const title = decodeHtml(m[1].trim());
-    if (title.length > 0 && title.length < 200) found.add(title);
-  }
-  return found;
-}
-
-function resolveTitleToFile(graphPath: string, title: string): string | null {
-  const pagesDir = join(graphPath, 'pages');
-  const candidates = [
-    title,
-    title.replace(/\//g, '___'),
-    title.replace(/:/g, '%3A'),
-    title.replace(/\?/g, '%3F'),
-    title.replace(/"/g, '%22'),
-  ];
-  for (const c of candidates) {
-    const p = join(pagesDir, c + '.md');
-    if (existsSync(p)) return p;
-  }
-  return null;
-}
 
 const SEVERITY_RANK: Record<DriftSeverity, number> = {
   error: 0,
@@ -479,7 +440,7 @@ export function auditDrift(
     for (let hop = 0; hop < hops; hop++) {
       const next = new Set<string>();
       for (const title of frontier) {
-        const file = resolveTitleToFile(graphPath, title);
+        const file = resolveEntryFile(graphPath, { title });
         if (!file) continue;
         let content: string;
         try {
@@ -490,7 +451,7 @@ export function auditDrift(
         for (const linked of extractWikilinks(content)) {
           if (manifestTitles.has(linked)) continue;
           if (candidateTitles.has(linked)) continue;
-          const linkedFile = resolveTitleToFile(graphPath, linked);
+          const linkedFile = resolveEntryFile(graphPath, { title: linked });
           if (!linkedFile) continue;
           candidateTitles.add(linked);
           next.add(linked);

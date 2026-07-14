@@ -18,14 +18,13 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { decodeHtml, resolveLogseqPath } from './logseqToAstro';
+import { decodeHtml, WIKILINK_RE } from './logseq-primitives';
+import { resolveLogseqPath } from './logseqToAstro';
 
 export interface OutLink {
   title: string;
   weight: number;
 }
-
-const WIKILINK_RE = /\[\[([^\[\]\|]+?)(?:\|[^\]]+)?\]\]/g;
 
 /**
  * Extract a page's out-links: `related::` targets (weight 2, curated) + body
