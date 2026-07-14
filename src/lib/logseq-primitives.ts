@@ -61,7 +61,13 @@ export function escapeHtml(s: string): string {
     .replace(/"/g, '&quot;');
 }
 
-/** Lossy slug — must match the 777westwood-baseline implementation byte-for-byte. */
+/**
+ * Lossy slug — feeds published route URLs, so its output is STABLE by contract:
+ * changing it silently breaks existing permalinks and cross-page wikilink
+ * resolution. (Originally pinned to the 777westwood baseline, whose regression
+ * was retired in v0.2.0; the stability contract now lives in this module's unit
+ * tests — see test/lib/logseq-primitives.test.ts.)
+ */
 export function slugify(title: string): string {
   return title
     .toLowerCase()

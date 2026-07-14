@@ -17,8 +17,10 @@
  * Reuses the pure helpers from logseqToAstro (parseProperties,
  * resolveLogseqPath, extractReferencedAssets, decodeHtml). The body-cleaning
  * core is DUPLICATED here rather than refactored out of `transformBody`
- * because that function is pinned byte-for-byte by the 777westwood Astro
- * regression and must not be touched (see its header comment).
+ * because that function's output is byte-sensitive for real Astro consumers and
+ * currently has no test coverage (its 777westwood byte-equivalence regression
+ * was retired in v0.2.0; see its header comment + bd kb-projection-s6h). Unify
+ * the two only once transformBody has snapshot coverage.
  */
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';

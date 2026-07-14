@@ -170,9 +170,14 @@ export function copyReferencedAssets(args: {
  * Body transform — strip LogSeq syntax, dedent implicit-root indentation,
  * rewrite wikilinks to Astro routes (or unresolved spans). Pure / idempotent.
  *
- * Verified byte-equivalent to the legacy 2026-04-18 transform-kb.ts pipeline
- * via kyber/scripts/regression/777westwood-astro.ts. Do not refactor without
- * re-running that regression.
+ * Output is BYTE-SENSITIVE for real consumer sites. It was once verified
+ * byte-equivalent to the legacy 2026-04-18 transform-kb.ts pipeline via
+ * kyber/scripts/regression/777westwood-astro.ts — but that regression (and the
+ * legacy/ baseline it diffed against) was RETIRED in v0.2.0, so it is no longer
+ * re-runnable. There is currently NO automated coverage of this function: treat
+ * any change to it as unguarded and add snapshot coverage first (bd
+ * kb-projection-s6h), which is the standing precondition for bd
+ * kb-projection-nk3.1.
  */
 export function transformBody(
   body: string,
