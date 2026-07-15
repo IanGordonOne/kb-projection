@@ -1,0 +1,17 @@
+{
+  "vars": {
+    "project": "kb-projection",
+    "date": { "builtin": "date" }
+  },
+  "introspectors": [
+    {
+      "name": "roadmap",
+      "run": "bun ~/.claude/skills/_TOOLING/_ROADMAP/Tools/RoadmapTree.ts --bd-args \"--all\"",
+      "output": "docs/roadmap-tree.json"
+    }
+  ],
+  "data": { "roadmap": "docs/roadmap-tree.json" },
+  "templates": [
+    { "input": "docs/templates/ROADMAP.md", "output": "ROADMAP.md" }
+  ]
+}

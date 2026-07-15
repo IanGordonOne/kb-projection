@@ -9,3 +9,4 @@ dist/
 .dolt/
 *.db
 .beads-credential-key
+docs/roadmap-tree.json
