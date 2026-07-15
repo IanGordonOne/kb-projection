@@ -14,14 +14,18 @@
  *   bun run bin/kb-reconcile.ts --desired <projected.md> --page <target.md> ...
  *   bun run bin/kb-reconcile.ts --all --manifest <manifest.json> --out-dir <dir>
  *                               [--graph <path>] [--faithfulness-min <n>] [--plan] [--json]
+ *   bun run bin/kb-reconcile.ts --check --page <target.md> [--source <logseq.md>] [--json]
+ *     (healthMonitor: report region drift states synced/stale/hash-mismatch/orphan; no writes)
  *
- * Exit codes: 0 ok · 2 usage · 3 grounding gate refused
+ * Exit codes: 0 ok · 1 drift found (--check) · 2 usage · 3 grounding gate refused
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import {
+  bridgeHealth,
   faithfulnessGate,
   projectSourcePage,
+  readBridge,
   reconcileManifest,
   reconcilePage,
   slugMapsFromManifest,
@@ -33,10 +37,42 @@ function parseArgs(argv: string[]): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--plan' || a === '--json' || a === '--all') out[a.slice(2)] = true;
+    if (a === '--plan' || a === '--json' || a === '--all' || a === '--check') out[a.slice(2)] = true;
     else if (a.startsWith('--')) out[a.slice(2)] = argv[++i];
   }
   return out;
+}
+
+/** healthMonitor: report region drift states (synced/stale/hash-mismatch/orphan) without writing. */
+function runCheck(args: Record<string, string | boolean>): number {
+  const page = args.page as string | undefined;
+  if (!page) { process.stderr.write('usage: kb-reconcile --check --page <target.md> [--sidecar <p>] [--source <logseq.md>] [--manifest <m>]\n'); return 2; }
+  if (!existsSync(page)) { process.stderr.write(`not found: ${page}\n`); return 2; }
+  const sidecar = (args.sidecar as string) ?? `${page}.reconcile.json`;
+  const bridge = readBridge(existsSync(sidecar) ? readFileSync(sidecar, 'utf8') : null, basename(page));
+
+  // Optional fresh projection lets us distinguish `stale` (source changed) from `synced`.
+  let fresh: string | undefined;
+  const source = args.source as string | undefined;
+  if (source && existsSync(source)) {
+    const manifest = args.manifest as string | undefined;
+    const maps = manifest && existsSync(manifest) ? slugMapsFromManifest(manifest) : undefined;
+    const raw = readFileSync(source, 'utf8');
+    fresh = stampProjected(projectSourcePage(raw, maps?.publishedSlugs, maps?.titleToSlug), basename(source).replace(/\.mdx?$/, ''));
+  }
+
+  const health = bridgeHealth(readFileSync(page, 'utf8'), bridge, fresh);
+  if (args.json) { console.log(JSON.stringify({ page, sidecar, health }, null, 2)); return health.some((h) => h.state !== 'synced') ? 1 : 0; }
+
+  const rank: Record<string, number> = { 'hash-mismatch': 0, orphan: 1, stale: 2, synced: 3 };
+  console.log(`# kb-reconcile --check — ${page}  (${Object.keys(bridge.entries).length} tracked region(s)${fresh ? '' : '; no --source → stale not detected'})`);
+  for (const h of [...health].sort((a, b) => (rank[a.state] ?? 9) - (rank[b.state] ?? 9))) {
+    const flag = h.state === 'synced' ? '·' : h.state === 'stale' ? '↻' : '⚠';
+    console.log(`  ${flag} ${h.state.toUpperCase().padEnd(13)} ${h.id.padEnd(28)} ${h.source ?? ''}`);
+  }
+  const bad = health.filter((h) => h.state !== 'synced');
+  console.log(`\n${health.length - bad.length} synced · ${bad.length} drifted`);
+  return bad.length ? 1 : 0;
 }
 
 function runBatch(args: Record<string, string | boolean>): number {
@@ -77,6 +113,7 @@ function runBatch(args: Record<string, string | boolean>): number {
 
 function main(): number {
   const args = parseArgs(process.argv.slice(2));
+  if (args.check) return runCheck(args);
   if (args.all) return runBatch(args);
 
   const page = args.page as string;

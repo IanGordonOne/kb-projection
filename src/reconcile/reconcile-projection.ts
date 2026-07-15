@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import {
   createRegionAfter,
   hashRegionBody,
@@ -258,6 +258,79 @@ export function applyProjection(desiredContent: string, actualContent: string, p
   return { content, items, newPrior, created, regenerated, removed, unchanged, reordered, handEdited };
 }
 
+// ── Region bridge (kb-projection-6ji.6) ──────────────────────────────────────
+//
+// The region-level analogue of the projection engine's page-level projection_bridge:
+// an emitted↔source correspondence store keyed on region id, carrying each projected
+// region's declared source + content hash. Supersedes the flat {regionId:hash} sidecar
+// (which is still read for back-compat). healthMonitor's four drift states are computed
+// at region granularity by bridgeHealth().
+
+export interface RegionBridgeEntry { source?: string; contentHash: string; }
+export interface RegionBridge {
+  version: 'region-bridge/v1';
+  page: string;
+  entries: Record<string, RegionBridgeEntry>;
+}
+
+/** healthMonitor drift states, at region granularity. */
+export type HealthState = 'synced' | 'stale' | 'hash-mismatch' | 'orphan';
+export interface RegionHealth { id: string; source?: string; state: HealthState; }
+
+/** Read a bridge sidecar, normalizing the legacy flat `{regionId: hash}` form to v1. */
+export function readBridge(raw: string | null, page = ''): RegionBridge {
+  if (!raw) return { version: 'region-bridge/v1', page, entries: {} };
+  const j = JSON.parse(raw) as unknown;
+  if (j && typeof j === 'object' && (j as RegionBridge).version === 'region-bridge/v1' && (j as RegionBridge).entries) {
+    return j as RegionBridge;
+  }
+  const entries: Record<string, RegionBridgeEntry> = {};
+  for (const [id, h] of Object.entries(j as Record<string, unknown>)) if (typeof h === 'string') entries[id] = { contentHash: h };
+  return { version: 'region-bridge/v1', page, entries };
+}
+
+/** Build a bridge from a page's PROJECTED regions (source + content hash per region). */
+export function bridgeFromPage(content: string, page: string): RegionBridge {
+  const entries: Record<string, RegionBridgeEntry> = {};
+  for (const r of parseRegions(content, page)) {
+    const pm = projectedMarker(content, r);
+    if (pm.projected) entries[r.id] = { source: pm.source, contentHash: hashRegionBody(content, r) };
+  }
+  return { version: 'region-bridge/v1', page, entries };
+}
+
+/** The prior-hash view the reconciler consumes (regionId → last-emitted hash). */
+export function bridgeToPrior(bridge: RegionBridge): PriorState {
+  return Object.fromEntries(Object.entries(bridge.entries).map(([id, e]) => [id, e.contentHash]));
+}
+
+/**
+ * healthMonitor at region granularity. For each tracked (bridged) region:
+ *   orphan        — the region is gone from the page (emitted region deleted out-of-band)
+ *   hash-mismatch — the page region was hand-edited off-source (page hash ≠ bridge)
+ *   stale         — source changed since last emit (fresh projection ≠ bridge), page clean
+ *   synced        — page matches bridge (and, if given, the fresh projection)
+ * `freshProjection` is optional; without it, stale can't be distinguished from synced.
+ */
+export function bridgeHealth(actualContent: string, bridge: RegionBridge, freshProjection?: string): RegionHealth[] {
+  const actualById = new Map(parseRegions(actualContent, 'a').map((r) => [r.id, r] as const));
+  const desiredById = freshProjection ? new Map(parseRegions(freshProjection, 'd').map((r) => [r.id, r] as const)) : undefined;
+  const out: RegionHealth[] = [];
+  for (const [id, e] of Object.entries(bridge.entries)) {
+    const a = actualById.get(id);
+    if (!a) { out.push({ id, source: e.source, state: 'orphan' }); continue; }
+    const ah = hashRegionBody(actualContent, a);
+    if (ah !== e.contentHash) { out.push({ id, source: e.source, state: 'hash-mismatch' }); continue; }
+    if (desiredById) {
+      const d = desiredById.get(id);
+      const dh = d ? hashRegionBody(freshProjection as string, d) : undefined;
+      if (dh !== undefined && dh !== e.contentHash) { out.push({ id, source: e.source, state: 'stale' }); continue; }
+    }
+    out.push({ id, source: e.source, state: 'synced' });
+  }
+  return out;
+}
+
 export interface ReconcilePageResult {
   firstRun: boolean;
   items: ProjPlanItem[];
@@ -289,14 +362,14 @@ export function reconcilePage(opts: {
   dryRun?: boolean;
 }): ReconcilePageResult {
   const { desiredContent, pageFile, sidecarFile, dryRun } = opts;
-  const prior: PriorState = existsSync(sidecarFile) ? JSON.parse(readFileSync(sidecarFile, 'utf8')) : {};
+  const page = basename(pageFile);
+  const bridge = readBridge(existsSync(sidecarFile) ? readFileSync(sidecarFile, 'utf8') : null, page);
+  const prior = bridgeToPrior(bridge);
 
   if (!existsSync(pageFile)) {
-    const seed: PriorState = {};
-    for (const r of parseRegions(desiredContent, 'desired')) seed[r.id] = hashRegionBody(desiredContent, r);
     if (!dryRun) {
       writeAtomic(pageFile, desiredContent);
-      writeAtomic(sidecarFile, JSON.stringify(seed, null, 2));
+      writeAtomic(sidecarFile, JSON.stringify(bridgeFromPage(desiredContent, page), null, 2));
     }
     const items = parseRegions(desiredContent, 'desired').map((r): ProjPlanItem => ({ id: r.id, verdict: 'create', reason: 'first projection' }));
     return { firstRun: true, items, created: items.map((i) => i.id), regenerated: [], removed: [], unchanged: [], reordered: [], handEdited: [], pageFile, sidecarFile };
@@ -306,7 +379,7 @@ export function reconcilePage(opts: {
   const res = applyProjection(desiredContent, actual, prior);
   if (!dryRun) {
     writeAtomic(pageFile, res.content);
-    writeAtomic(sidecarFile, JSON.stringify(res.newPrior, null, 2));
+    writeAtomic(sidecarFile, JSON.stringify(bridgeFromPage(res.content, page), null, 2));
   }
   return {
     firstRun: false,

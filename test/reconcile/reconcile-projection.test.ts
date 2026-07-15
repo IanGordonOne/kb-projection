@@ -4,6 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   applyProjection,
+  bridgeFromPage,
+  bridgeHealth,
+  readBridge,
   planProjection,
   projectSourcePage,
   projectedMarker,
@@ -207,6 +210,44 @@ describe('reorderProjected — projected regions to source order (6ji.5)', () =>
     expect(res.reordered.length).toBeGreaterThan(0);
     expect(res.content.indexOf('## Definition')).toBeLessThan(res.content.indexOf('## Levels'));
     expect(res.content).toContain('Free human region.'); // free region survives
+  });
+});
+
+describe('region bridge + healthMonitor states (6ji.6)', () => {
+  test('readBridge normalizes the legacy flat {id:hash} form to v1', () => {
+    const b = readBridge('{"definition":"abc123"}', 'p.md');
+    expect(b.version).toBe('region-bridge/v1');
+    expect(b.entries.definition).toEqual({ contentHash: 'abc123' });
+  });
+
+  test('readBridge passes a v1 bridge through', () => {
+    const v1 = { version: 'region-bridge/v1', page: 'p.md', entries: { a: { source: 'S#a', contentHash: 'h' } } };
+    expect(readBridge(JSON.stringify(v1))).toEqual(v1 as any);
+  });
+
+  test('bridgeFromPage records only PROJECTED regions with source + hash', () => {
+    const b = bridgeFromPage(MIXED, 'p.md');
+    expect(Object.keys(b.entries)).toEqual(['definition']); // my-notes is free → not tracked
+    expect(b.entries.definition.source).toBe('Stat Arb#definition');
+    expect(b.entries.definition.contentHash).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  test('bridgeHealth: synced / hash-mismatch / stale / orphan', () => {
+    const bridge = bridgeFromPage(PROJECTED_V1, 'p.md');
+    // synced: page matches bridge, fresh projection matches too
+    expect(bridgeHealth(PROJECTED_V1, bridge, PROJECTED_V1).every((h) => h.state === 'synced')).toBe(true);
+
+    // hash-mismatch: a projected region hand-edited off-source
+    const handEdited = PROJECTED_V1.replace('Projected definition v1.', 'HUMAN edit.');
+    expect(bridgeHealth(handEdited, bridge).find((h) => h.id === 'definition')!.state).toBe('hash-mismatch');
+
+    // stale: page clean (matches bridge) but the fresh projection changed
+    const v2 = PROJECTED_V1.replace('Projected definition v1.', 'Projected definition v2.');
+    expect(bridgeHealth(PROJECTED_V1, bridge, v2).find((h) => h.id === 'definition')!.state).toBe('stale');
+
+    // orphan: a bridged region deleted from the page
+    const withoutDef = PROJECTED_V1.split('## Definition')[0] + PROJECTED_V1.split('\n\n').slice(3).join('\n\n');
+    expect(bridgeHealth('## Levels\n<!-- projected: source="Stat Arb#levels" -->\n\nLevels v1.\n', bridge).find((h) => h.id === 'definition')!.state).toBe('orphan');
   });
 });
 
