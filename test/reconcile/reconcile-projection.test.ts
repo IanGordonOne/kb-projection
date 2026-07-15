@@ -7,6 +7,7 @@ import {
   planProjection,
   projectSourcePage,
   reconcilePage,
+  slugMapsFromManifest,
   type PriorState,
 } from '../../src/reconcile/reconcile-projection';
 import { parseRegions, regionBody } from '../../src/reconcile/region-core';
@@ -43,6 +44,28 @@ describe('projectSourcePage — real transform on a LogSeq body', () => {
     expect(projected).not.toMatch(/^- ## /m); // de-bulleted
     const ids = parseRegions(projected, 'p').map((r) => r.id);
     expect(ids).toEqual(['definition', 'key-levels']);
+  });
+});
+
+describe('slugMapsFromManifest — resolve wikilinks from the publish manifest (6ji.3 item 1)', () => {
+  test('published entries build the slug set/map; excluded entries are omitted', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kb-manifest-'));
+    const mf = join(dir, 'm.json');
+    writeFileSync(mf, JSON.stringify({ entries: [{ title: 'Mean Reversion' }, { title: 'Secret Page', exclude: true }] }), 'utf8');
+    const { publishedSlugs, titleToSlug } = slugMapsFromManifest(mf);
+    expect(publishedSlugs.has('mean-reversion')).toBe(true);
+    expect(titleToSlug.get('Mean Reversion')).toBe('mean-reversion');
+    expect([...publishedSlugs]).not.toContain('secret-page'); // excluded
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('projectSourcePage with resolved maps turns a published [[wikilink]] into a /kb/ link', () => {
+    const raw = '- ## See Also\n  - Related: [[Mean Reversion]]';
+    const { publishedSlugs, titleToSlug } = { publishedSlugs: new Set(['mean-reversion']), titleToSlug: new Map([['Mean Reversion', 'mean-reversion']]) };
+    const projected = projectSourcePage(raw, publishedSlugs, titleToSlug);
+    expect(projected).toContain('[Mean Reversion](/kb/mean-reversion/)');
+    // without the maps it would be an unresolved span
+    expect(projectSourcePage(raw)).toContain('kb-unresolved');
   });
 });
 
@@ -107,6 +130,42 @@ describe('applyProjection — drift preserved, clean updates applied, sections c
     expect(res.applied).toEqual([]);
     expect(res.created).toEqual([]);
     expect(res.content).toBe(PROJECTED_V1);
+  });
+});
+
+describe('section deletion — provenance-gated pruning (6ji.3 item 5)', () => {
+  // baseline projection owns both sections
+  const prior = seedPrior(PROJECTED_V1);
+  // source later drops "Key Levels" — desired is definition-only
+  const V2_DROPPED = ['## Definition', '', 'Stat arb exploits temporary mispricings while market-neutral.', ''].join('\n');
+
+  test('a projection-owned section dropped from source (unmodified) plans as delete', () => {
+    const items = planProjection(V2_DROPPED, PROJECTED_V1, prior);
+    expect(items.find((i) => i.id === 'key-levels')!.verdict).toBe('delete');
+  });
+
+  test('without prune, a delete candidate is preserved on disk', () => {
+    const res = applyProjection(V2_DROPPED, PROJECTED_V1, prior, false);
+    expect(res.preserved).toContain('key-levels');
+    expect(res.deleted).toEqual([]);
+    expect(res.content).toContain('## Key Levels');
+  });
+
+  test('with prune, the section is removed and drops out of the baseline', () => {
+    const res = applyProjection(V2_DROPPED, PROJECTED_V1, prior, true);
+    expect(res.deleted).toContain('key-levels');
+    expect(res.content).not.toContain('## Key Levels');
+    expect(res.newPrior['key-levels']).toBeUndefined();
+    expect(res.content).toContain('## Definition'); // sibling intact
+  });
+
+  test('a dropped section that was HAND-EDITED is an orphan, preserved even with prune', () => {
+    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN kept this.');
+    const items = planProjection(V2_DROPPED, handEdited, prior);
+    expect(items.find((i) => i.id === 'key-levels')!.verdict).toBe('orphan');
+    const res = applyProjection(V2_DROPPED, handEdited, prior, true);
+    expect(res.deleted).toEqual([]);
+    expect(res.content).toContain('HUMAN kept this.');
   });
 });
 

@@ -22,12 +22,14 @@ import {
   normalizeForHash,
   parseRegions,
   regionBody,
+  type Region,
   regionSpan,
   replaceRegionBody,
 } from './region-core';
 import { transformBody } from '../lib/logseqToAstro';
+import { slugify } from '../lib/logseq-primitives';
 
-export type ProjVerdict = 'create' | 'update' | 'unchanged' | 'drifted' | 'conflict' | 'orphan';
+export type ProjVerdict = 'create' | 'update' | 'unchanged' | 'drifted' | 'conflict' | 'orphan' | 'delete';
 
 export interface ProjPlanItem {
   id: string;
@@ -40,6 +42,15 @@ export type PriorState = Record<string, string>;
 
 function hashBody(body: string): string {
   return createHash('sha256').update(normalizeForHash(body)).digest('hex').slice(0, 16);
+}
+
+/** Remove a region's whole span (anchor + body), collapsing the blank-line seam. */
+function removeRegionSpan(content: string, region: Region): string {
+  const eol = content.includes('\r\n') ? '\r\n' : '\n';
+  const lines = content.split(/\r?\n/);
+  const [s0, s1] = regionSpan(region);
+  lines.splice(s0, s1 - s0 + 1);
+  return lines.join(eol).replace(/\n{3,}/g, `${eol}${eol}`);
 }
 
 /** Per-region plan reconciling a freshly-projected page against the page on disk. */
@@ -63,9 +74,19 @@ export function planProjection(desiredContent: string, actualContent: string, pr
     else items.push({ id: d.id, verdict: 'update', reason: 'projection changed; page clean' });
   }
 
+  // Sections in the page but not the projection. Provenance decides the verdict:
+  //   projection once owned it (id ∈ prior) AND still pristine → 'delete' (source
+  //     dropped it; safe to prune). Otherwise → 'orphan' (hand-added, or hand-edited
+  //     since projection owned it) → preserve.
   const desiredIds = new Set(desired.map((r) => r.id));
   for (const a of parseRegions(actualContent, 'actual')) {
-    if (!desiredIds.has(a.id)) items.push({ id: a.id, verdict: 'orphan', reason: 'in page, not in projection — preserved' });
+    if (desiredIds.has(a.id)) continue;
+    const ph = prior[a.id];
+    if (ph !== undefined && hashRegionBody(actualContent, a) === ph) {
+      items.push({ id: a.id, verdict: 'delete', reason: 'projection-owned, dropped from source, unmodified' });
+    } else {
+      items.push({ id: a.id, verdict: 'orphan', reason: ph === undefined ? 'hand-added, not projection-owned — preserved' : 'hand-edited since projection — preserved' });
+    }
   }
   return items;
 }
@@ -78,10 +99,21 @@ export interface ApplyProjectionResult {
   created: string[];
   preserved: string[];
   skipped: string[];
+  deleted: string[];
 }
 
-/** Apply the projection plan: update clean regions, preserve drift/conflict/orphan, create absent ones. */
-export function applyProjection(desiredContent: string, actualContent: string, prior: PriorState): ApplyProjectionResult {
+/**
+ * Apply the projection plan: update clean regions, create absent ones, preserve
+ * drift/conflict/orphan. `prune` (default false) additionally removes 'delete'
+ * sections (projection-owned, dropped from source, unmodified); without it, those
+ * are preserved and merely surfaced.
+ */
+export function applyProjection(
+  desiredContent: string,
+  actualContent: string,
+  prior: PriorState,
+  prune = false,
+): ApplyProjectionResult {
   const items = planProjection(desiredContent, actualContent, prior);
   const desired = parseRegions(desiredContent, 'desired');
   const desiredById = new Map(desired.map((r) => [r.id, r] as const));
@@ -93,6 +125,7 @@ export function applyProjection(desiredContent: string, actualContent: string, p
   const created: string[] = [];
   const preserved: string[] = [];
   const skipped: string[] = [];
+  const deleted: string[] = [];
 
   // Updates first — they don't move region boundaries, so ids stay resolvable.
   for (const item of items.filter((i) => i.verdict === 'update')) {
@@ -112,6 +145,14 @@ export function applyProjection(desiredContent: string, actualContent: string, p
     content = createRegionAfter(content, pred, desiredLines.slice(s0, s1 + 1));
     created.push(item.id);
   }
+  // Deletes — only when pruning; otherwise a 'delete' section is preserved.
+  for (const item of items.filter((i) => i.verdict === 'delete')) {
+    if (!prune) { preserved.push(item.id); continue; }
+    const r = parseRegions(content, 'p').find((x) => x.id === item.id);
+    if (!r) { skipped.push(item.id); continue; }
+    content = removeRegionSpan(content, r);
+    deleted.push(item.id);
+  }
   for (const item of items) {
     if (item.verdict === 'drifted' || item.verdict === 'conflict' || item.verdict === 'orphan') preserved.push(item.id);
   }
@@ -130,7 +171,8 @@ export function applyProjection(desiredContent: string, actualContent: string, p
     if (hashRegionBody(content, r) === desiredHash) newPrior[d.id] = desiredHash; // in sync
     // else: preserved drift — leave newPrior[d.id] at the prior baseline
   }
-  return { content, items, newPrior, applied, created, preserved, skipped };
+  for (const id of deleted) delete newPrior[id]; // pruned sections leave the baseline
+  return { content, items, newPrior, applied, created, preserved, skipped, deleted };
 }
 
 export interface ReconcilePageResult {
@@ -140,6 +182,7 @@ export interface ReconcilePageResult {
   created: string[];
   preserved: string[];
   skipped: string[];
+  deleted: string[];
   pageFile: string;
   sidecarFile: string;
 }
@@ -160,8 +203,9 @@ export function reconcilePage(opts: {
   pageFile: string;
   sidecarFile: string;
   dryRun?: boolean;
+  prune?: boolean;
 }): ReconcilePageResult {
-  const { desiredContent, pageFile, sidecarFile, dryRun } = opts;
+  const { desiredContent, pageFile, sidecarFile, dryRun, prune } = opts;
   const prior: PriorState = existsSync(sidecarFile) ? JSON.parse(readFileSync(sidecarFile, 'utf8')) : {};
 
   if (!existsSync(pageFile)) {
@@ -172,11 +216,11 @@ export function reconcilePage(opts: {
       writeAtomic(sidecarFile, JSON.stringify(seed, null, 2));
     }
     const items = parseRegions(desiredContent, 'desired').map((r): ProjPlanItem => ({ id: r.id, verdict: 'create', reason: 'first projection' }));
-    return { firstRun: true, items, applied: [], created: items.map((i) => i.id), preserved: [], skipped: [], pageFile, sidecarFile };
+    return { firstRun: true, items, applied: [], created: items.map((i) => i.id), preserved: [], skipped: [], deleted: [], pageFile, sidecarFile };
   }
 
   const actual = readFileSync(pageFile, 'utf8');
-  const res = applyProjection(desiredContent, actual, prior);
+  const res = applyProjection(desiredContent, actual, prior, Boolean(prune));
   if (!dryRun) {
     writeAtomic(pageFile, res.content);
     writeAtomic(sidecarFile, JSON.stringify(res.newPrior, null, 2));
@@ -188,6 +232,7 @@ export function reconcilePage(opts: {
     created: res.created,
     preserved: res.preserved,
     skipped: res.skipped,
+    deleted: res.deleted,
     pageFile,
     sidecarFile,
   };
@@ -209,4 +254,21 @@ export function projectSourcePage(
   while (i < lines.length && /^[A-Za-z0-9_.-]+::/.test(lines[i])) i++; // skip page-property block
   const body = lines.slice(i).join('\n').replace(/^\n+/, '');
   return transformBody(body, publishedSlugs, titleToSlug);
+}
+
+/**
+ * Resolve publishedSlugs + titleToSlug from a publish manifest — the SAME derivation
+ * the loader uses (src/lib/loader.ts) — so `projectSourcePage` resolves `[[wikilinks]]`
+ * to real `/kb/<slug>/` links instead of unresolved spans. (6ji.3 item 1.)
+ */
+export function slugMapsFromManifest(manifestPath: string): {
+  publishedSlugs: Set<string>;
+  titleToSlug: Map<string, string>;
+} {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { entries: Array<{ title: string; exclude?: boolean }> };
+  const published = (manifest.entries ?? []).filter((e) => !e.exclude);
+  return {
+    publishedSlugs: new Set(published.map((e) => slugify(e.title))),
+    titleToSlug: new Map(published.map((e) => [e.title, slugify(e.title)] as const)),
+  };
 }
