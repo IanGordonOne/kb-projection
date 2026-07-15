@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   applyProjection,
+  parseGroundedRegions,
   planProjection,
   projectSourcePage,
   reconcilePage,
@@ -166,6 +167,53 @@ describe('section deletion — provenance-gated pruning (6ji.3 item 5)', () => {
     const res = applyProjection(V2_DROPPED, handEdited, prior, true);
     expect(res.deleted).toEqual([]);
     expect(res.content).toContain('HUMAN kept this.');
+  });
+});
+
+describe('grounded areas — faithfulness policy (6ji.4)', () => {
+  const prior = seedPrior(PROJECTED_V1);
+
+  test('parseGroundedRegions reads a LogSeq / YAML grounded-regions declaration', () => {
+    expect([...parseGroundedRegions('title:: X\ngrounded-regions:: definition, key-levels\n')].sort()).toEqual(['definition', 'key-levels']);
+    expect([...parseGroundedRegions('grounded-regions: [definition]')]).toEqual(['definition']);
+    expect(parseGroundedRegions('no declaration here').size).toBe(0);
+  });
+
+  test('a hand-edit to a GROUNDED region is grounded-drift, not ordinary drift', () => {
+    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN claim with no citation.');
+    const grounded = new Set(['key-levels']);
+    const items = planProjection(PROJECTED_V1, handEdited, prior, grounded);
+    expect(items.find((i) => i.id === 'key-levels')!.verdict).toBe('grounded-drift');
+    // same edit on a NON-grounded region is ordinary drift
+    const items2 = planProjection(PROJECTED_V1, handEdited, prior, new Set());
+    expect(items2.find((i) => i.id === 'key-levels')!.verdict).toBe('drifted');
+  });
+
+  test('grounded-drift is preserved on disk and reported in groundedDrift', () => {
+    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN claim with no citation.');
+    const res = applyProjection(PROJECTED_V1, handEdited, prior, false, new Set(['key-levels']));
+    expect(res.groundedDrift).toContain('key-levels');
+    expect(res.preserved).toContain('key-levels');
+    expect(res.content).toContain('HUMAN claim with no citation.'); // edit kept (flag, not overwrite)
+  });
+
+  test('grounded-drift keeps the baseline stale so it re-alarms until re-grounded', () => {
+    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN claim.');
+    const res = applyProjection(PROJECTED_V1, handEdited, prior, false, new Set(['key-levels']));
+    // baseline NOT advanced to the human text → a second run still flags it
+    const again = planProjection(PROJECTED_V1, res.content, res.newPrior, new Set(['key-levels']));
+    expect(again.find((i) => i.id === 'key-levels')!.verdict).toBe('grounded-drift');
+  });
+
+  test('reconcilePage surfaces groundedDrift via opts.groundedRegions', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kb-grounded-'));
+    const pageFile = join(dir, 'g.md');
+    const sidecar = join(dir, 'g.json');
+    reconcilePage({ desiredContent: PROJECTED_V1, pageFile, sidecarFile: sidecar }); // seed
+    writeFileSync(pageFile, PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN edit.'), 'utf8');
+    const res = reconcilePage({ desiredContent: PROJECTED_V1, pageFile, sidecarFile: sidecar, groundedRegions: new Set(['key-levels']) });
+    expect(res.groundedDrift).toContain('key-levels');
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

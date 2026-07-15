@@ -15,6 +15,7 @@
  * silently applied — conservative by design.
  */
 import { createHash } from 'node:crypto';
+import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import {
   createRegionAfter,
@@ -29,7 +30,7 @@ import {
 import { transformBody } from '../lib/logseqToAstro';
 import { slugify } from '../lib/logseq-primitives';
 
-export type ProjVerdict = 'create' | 'update' | 'unchanged' | 'drifted' | 'conflict' | 'orphan' | 'delete';
+export type ProjVerdict = 'create' | 'update' | 'unchanged' | 'drifted' | 'conflict' | 'orphan' | 'delete' | 'grounded-drift';
 
 export interface ProjPlanItem {
   id: string;
@@ -53,8 +54,18 @@ function removeRegionSpan(content: string, region: Region): string {
   return lines.join(eol).replace(/\n{3,}/g, `${eol}${eol}`);
 }
 
-/** Per-region plan reconciling a freshly-projected page against the page on disk. */
-export function planProjection(desiredContent: string, actualContent: string, prior: PriorState): ProjPlanItem[] {
+/**
+ * Per-region plan reconciling a freshly-projected page against the page on disk.
+ * `groundedRegions` ids carry a faithfulness policy: a hand-edit to a grounded region
+ * is a 'grounded-drift' faithfulness ALARM (still preserved) rather than ordinary
+ * drift/conflict — the region must stay faithful to its cited source (kb-projection-6ji.4).
+ */
+export function planProjection(
+  desiredContent: string,
+  actualContent: string,
+  prior: PriorState,
+  groundedRegions: Set<string> = new Set(),
+): ProjPlanItem[] {
   const desired = parseRegions(desiredContent, 'desired');
   const actualById = new Map(parseRegions(actualContent, 'actual').map((r) => [r.id, r] as const));
   const items: ProjPlanItem[] = [];
@@ -69,7 +80,9 @@ export function planProjection(desiredContent: string, actualContent: string, pr
     if (!ph) { items.push({ id: d.id, verdict: 'update', reason: 'no prior baseline; taking projection' }); continue; }
     const humanTouched = ah !== ph;
     const sourceChanged = dh !== ph;
-    if (humanTouched && sourceChanged) items.push({ id: d.id, verdict: 'conflict', reason: 'hand-edit AND projection changed' });
+    if (humanTouched && groundedRegions.has(d.id))
+      items.push({ id: d.id, verdict: 'grounded-drift', reason: 'GROUNDED area hand-edited — faithfulness alarm; gate before outward projection' });
+    else if (humanTouched && sourceChanged) items.push({ id: d.id, verdict: 'conflict', reason: 'hand-edit AND projection changed' });
     else if (humanTouched) items.push({ id: d.id, verdict: 'drifted', reason: 'hand-edited since last projection — preserved' });
     else items.push({ id: d.id, verdict: 'update', reason: 'projection changed; page clean' });
   }
@@ -100,21 +113,23 @@ export interface ApplyProjectionResult {
   preserved: string[];
   skipped: string[];
   deleted: string[];
+  groundedDrift: string[];
 }
 
 /**
  * Apply the projection plan: update clean regions, create absent ones, preserve
- * drift/conflict/orphan. `prune` (default false) additionally removes 'delete'
- * sections (projection-owned, dropped from source, unmodified); without it, those
- * are preserved and merely surfaced.
+ * drift/conflict/orphan/grounded-drift. `prune` (default false) additionally removes
+ * 'delete' sections (projection-owned, dropped from source, unmodified). `groundedRegions`
+ * marks faithfulness-policed areas — their drift is preserved but reported in groundedDrift.
  */
 export function applyProjection(
   desiredContent: string,
   actualContent: string,
   prior: PriorState,
   prune = false,
+  groundedRegions: Set<string> = new Set(),
 ): ApplyProjectionResult {
-  const items = planProjection(desiredContent, actualContent, prior);
+  const items = planProjection(desiredContent, actualContent, prior, groundedRegions);
   const desired = parseRegions(desiredContent, 'desired');
   const desiredById = new Map(desired.map((r) => [r.id, r] as const));
   const desiredOrder = desired.map((r) => r.id);
@@ -153,8 +168,10 @@ export function applyProjection(
     content = removeRegionSpan(content, r);
     deleted.push(item.id);
   }
+  const groundedDrift: string[] = [];
   for (const item of items) {
     if (item.verdict === 'drifted' || item.verdict === 'conflict' || item.verdict === 'orphan') preserved.push(item.id);
+    else if (item.verdict === 'grounded-drift') { preserved.push(item.id); groundedDrift.push(item.id); }
   }
 
   // PROVENANCE INVARIANT: `prior` is the hash of what projection last WROTE. Advance
@@ -172,7 +189,24 @@ export function applyProjection(
     // else: preserved drift — leave newPrior[d.id] at the prior baseline
   }
   for (const id of deleted) delete newPrior[id]; // pruned sections leave the baseline
-  return { content, items, newPrior, applied, created, preserved, skipped, deleted };
+  return { content, items, newPrior, applied, created, preserved, skipped, deleted, groundedDrift };
+}
+
+/**
+ * Read a `grounded-regions::` (LogSeq) / `grounded-regions:` (YAML) declaration from
+ * a text's leading property/frontmatter block — a comma- or bracket-separated list of
+ * region ids the KB has marked faithful-to-source. (kb-projection-6ji.4.)
+ */
+export function parseGroundedRegions(text: string): Set<string> {
+  const m = text.match(/^\s*grounded-regions::?\s*(.+)$/m);
+  if (!m) return new Set();
+  return new Set(
+    m[1]
+      .replace(/^\[|\]$/g, '')
+      .split(',')
+      .map((s) => s.trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean),
+  );
 }
 
 export interface ReconcilePageResult {
@@ -183,6 +217,7 @@ export interface ReconcilePageResult {
   preserved: string[];
   skipped: string[];
   deleted: string[];
+  groundedDrift: string[];
   pageFile: string;
   sidecarFile: string;
 }
@@ -204,8 +239,10 @@ export function reconcilePage(opts: {
   sidecarFile: string;
   dryRun?: boolean;
   prune?: boolean;
+  groundedRegions?: Set<string>;
 }): ReconcilePageResult {
   const { desiredContent, pageFile, sidecarFile, dryRun, prune } = opts;
+  const groundedRegions = opts.groundedRegions ?? new Set();
   const prior: PriorState = existsSync(sidecarFile) ? JSON.parse(readFileSync(sidecarFile, 'utf8')) : {};
 
   if (!existsSync(pageFile)) {
@@ -216,11 +253,11 @@ export function reconcilePage(opts: {
       writeAtomic(sidecarFile, JSON.stringify(seed, null, 2));
     }
     const items = parseRegions(desiredContent, 'desired').map((r): ProjPlanItem => ({ id: r.id, verdict: 'create', reason: 'first projection' }));
-    return { firstRun: true, items, applied: [], created: items.map((i) => i.id), preserved: [], skipped: [], deleted: [], pageFile, sidecarFile };
+    return { firstRun: true, items, applied: [], created: items.map((i) => i.id), preserved: [], skipped: [], deleted: [], groundedDrift: [], pageFile, sidecarFile };
   }
 
   const actual = readFileSync(pageFile, 'utf8');
-  const res = applyProjection(desiredContent, actual, prior, Boolean(prune));
+  const res = applyProjection(desiredContent, actual, prior, Boolean(prune), groundedRegions);
   if (!dryRun) {
     writeAtomic(pageFile, res.content);
     writeAtomic(sidecarFile, JSON.stringify(res.newPrior, null, 2));
@@ -233,9 +270,41 @@ export function reconcilePage(opts: {
     preserved: res.preserved,
     skipped: res.skipped,
     deleted: res.deleted,
+    groundedDrift: res.groundedDrift,
     pageFile,
     sidecarFile,
   };
+}
+
+export type FaithfulnessGateResult =
+  | { status: 'pass'; applicable: boolean }
+  | { status: 'refused'; reason: string }
+  | { status: 'unenforced'; reason: string };
+
+/**
+ * The GATE half of grounded flag+gate: shell out to the CANONICAL kb_cli
+ * faithfulness-gate (never a reimplemented threshold — skill mandate). exit 3 →
+ * refused (below citation-recall minimum). If kb_cli is absent/unusable, degrade to
+ * 'unenforced' so the grounded-drift FLAG still stands as an advisory alarm.
+ */
+export function faithfulnessGate(pageFile: string, faithfulnessMin: number, kbCli = 'kb_cli'): FaithfulnessGateResult {
+  try {
+    const out = execSync(`${kbCli} faithfulness-gate --page ${JSON.stringify(pageFile)} --faithfulness-min ${faithfulnessMin}`, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).toString();
+    const parsed = JSON.parse(out) as { refused?: boolean; reason?: string; applicable?: boolean };
+    if (parsed.refused) return { status: 'refused', reason: parsed.reason ?? 'below faithfulness minimum' };
+    return { status: 'pass', applicable: parsed.applicable !== false };
+  } catch (err) {
+    const e = err as { status?: number; stdout?: Buffer };
+    if (e.status === 3 && e.stdout) {
+      try {
+        const parsed = JSON.parse(e.stdout.toString()) as { reason?: string };
+        return { status: 'refused', reason: parsed.reason ?? 'below faithfulness minimum' };
+      } catch { /* fall through */ }
+    }
+    return { status: 'unenforced', reason: `kb_cli faithfulness-gate unavailable (${(err as Error).message.split('\n')[0]})` };
+  }
 }
 
 /**
