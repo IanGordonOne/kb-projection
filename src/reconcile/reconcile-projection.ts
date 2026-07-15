@@ -1,18 +1,25 @@
 /**
- * reconcile-projection — wire the region-grain reconciler (kb-projection-6ji.1) to
- * the REAL projection pipeline and a real page on disk.
+ * reconcile-projection — region-level projection reconciler (kb-projection-6ji.*).
  *
- * Desired-state comes from the actual projection: a freshly-projected page is itself
- * region-structured (every `## heading` is a region; see region-core.parseRegions),
- * so DESIRED = parseRegions(projectedContent). We reconcile it, region by region,
- * against the ACTUAL page file, using a persisted PRIOR-hash sidecar to tell a
- * human's hand-edit (DRIFT → preserve) apart from a stale output (UPDATE → apply).
+ * CORRECTED MODEL (Ian, 2026-07-15): the boundary is PROJECTED vs NON-PROJECTED
+ * region, NOT engine vs human.
+ *   - A PROJECTED region carries a `projected` marker naming its KB source and is
+ *     source-owned. If the page copy diverges from a fresh projection — a source
+ *     change OR an off-source hand-edit — the remedy is REGENERATE (source-wins),
+ *     matching the skill's page-level onlyStale / healthMonitor `hash-mismatch` →
+ *     overwrite. Drift on a projected region is a defect, not an edit to preserve.
+ *   - A NON-PROJECTED region is a free editing surface for ANYONE (humans AND
+ *     engines/agents). It has no source, cannot drift, and is NEVER touched here.
+ * A page mixes both (managed-block pattern); this reconciler manages only the
+ * projected regions.
  *
- * First run (no page yet) writes the projection verbatim and seeds the sidecar.
- * Re-runs reconcile. Creates copy the desired region's whole span (format-agnostic:
- * works for `##`, <SectionHeading/>, and <Region> alike). Section add/remove beyond
- * create is surfaced (missing predecessor → skipped; orphan → preserved), not
- * silently applied — conservative by design.
+ * Grounding (citation-recall / faithfulness) is a PAGE property of the source, gated
+ * per-page via the canonical `kb_cli faithfulness-gate` — not a per-region concern.
+ *
+ * The prior-hash sidecar is the region-level analogue of the projection bridge; here
+ * it only DETECTS/REPORTS the drift kind (hand-edited vs source-changed) — the remedy
+ * is always source-wins. Unifying it with ~/.kyber/projection_bridge.json is a
+ * follow-up (that file lives in the retired legacy path, absent from this repo).
  */
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
@@ -22,7 +29,6 @@ import { join } from 'node:path';
 import {
   createRegionAfter,
   hashRegionBody,
-  normalizeForHash,
   parseRegions,
   regionBody,
   type Region,
@@ -32,20 +38,20 @@ import {
 import { resolveLogseqPath, transformBody } from '../lib/logseqToAstro';
 import { slugify } from '../lib/logseq-primitives';
 
-export type ProjVerdict = 'create' | 'update' | 'unchanged' | 'drifted' | 'conflict' | 'orphan' | 'delete' | 'grounded-drift';
+export type ProjVerdict = 'create' | 'regenerate' | 'unchanged' | 'remove';
+export type DriftKind = 'hand-edited' | 'source-changed' | 'both';
 
 export interface ProjPlanItem {
   id: string;
   verdict: ProjVerdict;
   reason: string;
+  source?: string;
+  /** For a regenerate: what diverged (reporting only — the remedy is always source-wins). */
+  drift?: DriftKind;
 }
 
-/** id → last-projected normalized-body hash. */
+/** id → last-projected normalized-body hash (region-level bridge; drift signal). */
 export type PriorState = Record<string, string>;
-
-function hashBody(body: string): string {
-  return createHash('sha256').update(normalizeForHash(body)).digest('hex').slice(0, 16);
-}
 
 /** Remove a region's whole span (anchor + body), collapsing the blank-line seam. */
 function removeRegionSpan(content: string, region: Region): string {
@@ -56,52 +62,85 @@ function removeRegionSpan(content: string, region: Region): string {
   return lines.join(eol).replace(/\n{3,}/g, `${eol}${eol}`);
 }
 
+const PROJECTED_ANCHOR_RE = /<(?:Region|SectionHeading)\b[^>]*\bprojected\b/;
+const SOURCE_ATTR_RE = /\bsource=["']([^"']+)["']/;
+const PROJECTED_COMMENT_RE = /^<!--\s*projected:\s*(.*?)-->$/;
+
 /**
- * Per-region plan reconciling a freshly-projected page against the page on disk.
- * `groundedRegions` ids carry a faithfulness policy: a hand-edit to a grounded region
- * is a 'grounded-drift' faithfulness ALARM (still preserved) rather than ordinary
- * drift/conflict — the region must stay faithful to its cited source (kb-projection-6ji.4).
+ * Is this region a PROJECTED (source-owned, managed) region? A projected region
+ * carries a `projected` marker — either an attribute on its <Region>/<SectionHeading>
+ * anchor, or a `<!-- projected: source="…" -->` comment as the FIRST body line (the
+ * comment travels inside the region span, so it survives create/regenerate and renders
+ * invisibly). Everything else is a free non-projected region.
  */
-export function planProjection(
-  desiredContent: string,
-  actualContent: string,
-  prior: PriorState,
-  groundedRegions: Set<string> = new Set(),
-): ProjPlanItem[] {
+export function projectedMarker(content: string, region: Region): { projected: boolean; source?: string } {
+  const lines = content.split(/\r?\n/);
+  const anchor = lines[regionSpan(region)[0]] ?? '';
+  if (PROJECTED_ANCHOR_RE.test(anchor)) return { projected: true, source: anchor.match(SOURCE_ATTR_RE)?.[1] };
+  for (let i = region.bodyStart; i <= region.bodyEnd; i++) {
+    const l = (lines[i] ?? '').trim();
+    if (!l) continue;
+    const cm = l.match(PROJECTED_COMMENT_RE);
+    return cm ? { projected: true, source: cm[1].match(SOURCE_ATTR_RE)?.[1] } : { projected: false };
+  }
+  return { projected: false };
+}
+
+/**
+ * Stamp projected markers onto a fresh projection so its regions declare themselves
+ * source-owned. Inserts `<!-- projected: source="<title>#<id>" -->` as the first body
+ * line of each heading region. Idempotent (skips a region already marked). The marker
+ * travels with the region span and renders invisibly.
+ */
+export function stampProjected(content: string, sourceTitle: string): string {
+  const eol = content.includes('\r\n') ? '\r\n' : '\n';
+  let lines = content.split(/\r?\n/);
+  // Bottom-to-top so earlier insertions don't shift not-yet-processed anchors.
+  const regions = parseRegions(lines.join('\n'), 'p').filter((r) => r.kind === 'heading');
+  for (const r of [...regions].sort((a, b) => b.bodyStart - a.bodyStart)) {
+    if (projectedMarker(lines.join('\n'), r).projected) continue;
+    lines.splice(r.bodyStart, 0, `<!-- projected: source="${sourceTitle}#${r.id}" -->`, '');
+  }
+  return lines.join(eol);
+}
+
+/**
+ * Plan the reconcile of a page against a fresh projection. DESIRED = the projected
+ * regions the engine wants (from the fresh projection — all carry markers). Only
+ * projected regions are considered; the page's non-projected regions are ignored
+ * (free surface). Remedy is source-wins: any projected region that differs regenerates.
+ */
+export function planProjection(desiredContent: string, actualContent: string, prior: PriorState = {}): ProjPlanItem[] {
   const desired = parseRegions(desiredContent, 'desired');
-  const actualById = new Map(parseRegions(actualContent, 'actual').map((r) => [r.id, r] as const));
+  const actualRegions = parseRegions(actualContent, 'actual');
+  const actualById = new Map(actualRegions.map((r) => [r.id, r] as const));
   const items: ProjPlanItem[] = [];
 
   for (const d of desired) {
+    const source = projectedMarker(desiredContent, d).source;
     const a = actualById.get(d.id);
-    const dh = hashBody(regionBody(desiredContent, d));
-    if (!a) { items.push({ id: d.id, verdict: 'create', reason: 'in projection, absent from page' }); continue; }
+    if (!a) { items.push({ id: d.id, verdict: 'create', reason: 'projected region absent from page', source }); continue; }
+    const dh = hashRegionBody(desiredContent, d);
     const ah = hashRegionBody(actualContent, a);
+    if (ah === dh) { items.push({ id: d.id, verdict: 'unchanged', reason: 'page matches projection', source }); continue; }
     const ph = prior[d.id];
-    if (ah === dh) { items.push({ id: d.id, verdict: 'unchanged', reason: 'page already matches projection' }); continue; }
-    if (!ph) { items.push({ id: d.id, verdict: 'update', reason: 'no prior baseline; taking projection' }); continue; }
-    const humanTouched = ah !== ph;
-    const sourceChanged = dh !== ph;
-    if (humanTouched && groundedRegions.has(d.id))
-      items.push({ id: d.id, verdict: 'grounded-drift', reason: 'GROUNDED area hand-edited — faithfulness alarm; gate before outward projection' });
-    else if (humanTouched && sourceChanged) items.push({ id: d.id, verdict: 'conflict', reason: 'hand-edit AND projection changed' });
-    else if (humanTouched) items.push({ id: d.id, verdict: 'drifted', reason: 'hand-edited since last projection — preserved' });
-    else items.push({ id: d.id, verdict: 'update', reason: 'projection changed; page clean' });
+    const handEdited = ph !== undefined && ah !== ph;
+    const sourceChanged = ph === undefined || dh !== ph;
+    const drift: DriftKind = handEdited && sourceChanged ? 'both' : handEdited ? 'hand-edited' : 'source-changed';
+    const reason =
+      drift === 'hand-edited' ? 'projected region hand-edited off-source — regenerating (source-wins)'
+      : drift === 'both' ? 'source changed AND page hand-edited — regenerating (source-wins)'
+      : 'source changed — regenerating';
+    items.push({ id: d.id, verdict: 'regenerate', reason, source, drift });
   }
 
-  // Sections in the page but not the projection. Provenance decides the verdict:
-  //   projection once owned it (id ∈ prior) AND still pristine → 'delete' (source
-  //     dropped it; safe to prune). Otherwise → 'orphan' (hand-added, or hand-edited
-  //     since projection owned it) → preserve.
+  // Projected regions on the page that the source dropped → remove (source-owned).
+  // Non-projected regions absent from the projection are free content — left alone.
   const desiredIds = new Set(desired.map((r) => r.id));
-  for (const a of parseRegions(actualContent, 'actual')) {
+  for (const a of actualRegions) {
     if (desiredIds.has(a.id)) continue;
-    const ph = prior[a.id];
-    if (ph !== undefined && hashRegionBody(actualContent, a) === ph) {
-      items.push({ id: a.id, verdict: 'delete', reason: 'projection-owned, dropped from source, unmodified' });
-    } else {
-      items.push({ id: a.id, verdict: 'orphan', reason: ph === undefined ? 'hand-added, not projection-owned — preserved' : 'hand-edited since projection — preserved' });
-    }
+    const pm = projectedMarker(actualContent, a);
+    if (pm.projected) items.push({ id: a.id, verdict: 'remove', reason: 'projected region dropped from source', source: pm.source });
   }
   return items;
 }
@@ -110,116 +149,69 @@ export interface ApplyProjectionResult {
   content: string;
   items: ProjPlanItem[];
   newPrior: PriorState;
-  applied: string[];
   created: string[];
-  preserved: string[];
-  skipped: string[];
-  deleted: string[];
-  groundedDrift: string[];
+  regenerated: string[];
+  removed: string[];
+  unchanged: string[];
+  /** Projected regions that drifted (hand-edited off-source) — reported like healthMonitor's hash-mismatch. */
+  handEdited: string[];
 }
 
-/**
- * Apply the projection plan: update clean regions, create absent ones, preserve
- * drift/conflict/orphan/grounded-drift. `prune` (default false) additionally removes
- * 'delete' sections (projection-owned, dropped from source, unmodified). `groundedRegions`
- * marks faithfulness-policed areas — their drift is preserved but reported in groundedDrift.
- */
-export function applyProjection(
-  desiredContent: string,
-  actualContent: string,
-  prior: PriorState,
-  prune = false,
-  groundedRegions: Set<string> = new Set(),
-): ApplyProjectionResult {
-  const items = planProjection(desiredContent, actualContent, prior, groundedRegions);
+/** Apply the plan: source-wins regenerate divergent projected regions, create absent ones, remove dropped ones. */
+export function applyProjection(desiredContent: string, actualContent: string, prior: PriorState = {}): ApplyProjectionResult {
+  const items = planProjection(desiredContent, actualContent, prior);
   const desired = parseRegions(desiredContent, 'desired');
   const desiredById = new Map(desired.map((r) => [r.id, r] as const));
   const desiredOrder = desired.map((r) => r.id);
   const desiredLines = desiredContent.split(/\r?\n/);
 
   let content = actualContent;
-  const applied: string[] = [];
   const created: string[] = [];
-  const preserved: string[] = [];
-  const skipped: string[] = [];
-  const deleted: string[] = [];
+  const regenerated: string[] = [];
+  const removed: string[] = [];
+  const unchanged: string[] = [];
 
-  // Updates first — they don't move region boundaries, so ids stay resolvable.
-  for (const item of items.filter((i) => i.verdict === 'update')) {
-    const r = parseRegions(content, 'p').find((x) => x.id === item.id)!;
-    content = replaceRegionBody(content, r, regionBody(desiredContent, desiredById.get(item.id)!));
-    applied.push(item.id);
+  for (const it of items.filter((i) => i.verdict === 'regenerate')) {
+    const r = parseRegions(content, 'p').find((x) => x.id === it.id)!;
+    content = replaceRegionBody(content, r, regionBody(desiredContent, desiredById.get(it.id)!));
+    regenerated.push(it.id);
   }
-  // Creates — copy the desired region's whole span (heading/anchor + body) after its
-  // predecessor in the desired order, if that predecessor resolves in the page.
-  for (const item of items.filter((i) => i.verdict === 'create')) {
-    const dRegion = desiredById.get(item.id)!;
-    const idx = desiredOrder.indexOf(item.id);
+  for (const it of items.filter((i) => i.verdict === 'remove')) {
+    const r = parseRegions(content, 'p').find((x) => x.id === it.id);
+    if (r) { content = removeRegionSpan(content, r); removed.push(it.id); }
+  }
+  for (const it of items.filter((i) => i.verdict === 'create')) {
+    const d = desiredById.get(it.id)!;
+    const idx = desiredOrder.indexOf(it.id);
     const predId = idx > 0 ? desiredOrder[idx - 1] : undefined;
-    const pred = predId ? parseRegions(content, 'p').find((x) => x.id === predId) : undefined;
-    if (!pred) { skipped.push(item.id); continue; }
-    const [s0, s1] = regionSpan(dRegion);
+    const regions = parseRegions(content, 'p');
+    const pred = (predId ? regions.find((x) => x.id === predId) : undefined) ?? regions[regions.length - 1];
+    if (!pred) continue; // empty page on a re-run shouldn't happen (first run writes verbatim)
+    const [s0, s1] = regionSpan(d);
     content = createRegionAfter(content, pred, desiredLines.slice(s0, s1 + 1));
-    created.push(item.id);
+    created.push(it.id);
   }
-  // Deletes — only when pruning; otherwise a 'delete' section is preserved.
-  for (const item of items.filter((i) => i.verdict === 'delete')) {
-    if (!prune) { preserved.push(item.id); continue; }
-    const r = parseRegions(content, 'p').find((x) => x.id === item.id);
-    if (!r) { skipped.push(item.id); continue; }
-    content = removeRegionSpan(content, r);
-    deleted.push(item.id);
-  }
-  const groundedDrift: string[] = [];
-  for (const item of items) {
-    if (item.verdict === 'drifted' || item.verdict === 'conflict' || item.verdict === 'orphan') preserved.push(item.id);
-    else if (item.verdict === 'grounded-drift') { preserved.push(item.id); groundedDrift.push(item.id); }
-  }
+  for (const it of items.filter((i) => i.verdict === 'unchanged')) unchanged.push(it.id);
 
-  // PROVENANCE INVARIANT: `prior` is the hash of what projection last WROTE. Advance
-  // it only for regions now in sync with the projection (applied/created/unchanged).
-  // For a preserved hand-edit, KEEP the old baseline — otherwise the human's text
-  // would silently become the new baseline and the next source change would stomp it
-  // as a "clean" update instead of surfacing a conflict.
+  // Prior advances to the fresh-projection hash for every projected region now present
+  // (post-regenerate they are all in sync). Removed regions leave the bridge.
   const newPrior: PriorState = { ...prior };
   const finalById = new Map(parseRegions(content, 'p').map((r) => [r.id, r] as const));
-  for (const d of desired) {
-    const r = finalById.get(d.id);
-    if (!r) continue;
-    const desiredHash = hashBody(regionBody(desiredContent, d));
-    if (hashRegionBody(content, r) === desiredHash) newPrior[d.id] = desiredHash; // in sync
-    // else: preserved drift — leave newPrior[d.id] at the prior baseline
-  }
-  for (const id of deleted) delete newPrior[id]; // pruned sections leave the baseline
-  return { content, items, newPrior, applied, created, preserved, skipped, deleted, groundedDrift };
-}
+  for (const d of desired) { const r = finalById.get(d.id); if (r) newPrior[d.id] = hashRegionBody(content, r); }
+  for (const id of removed) delete newPrior[id];
 
-/**
- * Read a `grounded-regions::` (LogSeq) / `grounded-regions:` (YAML) declaration from
- * a text's leading property/frontmatter block — a comma- or bracket-separated list of
- * region ids the KB has marked faithful-to-source. (kb-projection-6ji.4.)
- */
-export function parseGroundedRegions(text: string): Set<string> {
-  const m = text.match(/^\s*grounded-regions::?\s*(.+)$/m);
-  if (!m) return new Set();
-  return new Set(
-    m[1]
-      .replace(/^\[|\]$/g, '')
-      .split(',')
-      .map((s) => s.trim().replace(/^["']|["']$/g, ''))
-      .filter(Boolean),
-  );
+  const handEdited = items.filter((i) => i.drift === 'hand-edited' || i.drift === 'both').map((i) => i.id);
+  return { content, items, newPrior, created, regenerated, removed, unchanged, handEdited };
 }
 
 export interface ReconcilePageResult {
   firstRun: boolean;
   items: ProjPlanItem[];
-  applied: string[];
   created: string[];
-  preserved: string[];
-  skipped: string[];
-  deleted: string[];
-  groundedDrift: string[];
+  regenerated: string[];
+  removed: string[];
+  unchanged: string[];
+  handEdited: string[];
   pageFile: string;
   sidecarFile: string;
 }
@@ -231,20 +223,17 @@ function writeAtomic(file: string, content: string): void {
 }
 
 /**
- * Reconcile a projected page against its file on disk, persisting the prior-hash
- * sidecar. First run seeds; re-runs preserve hand-edits. `dryRun` computes the plan
- * without writing.
+ * Reconcile a projected page against its file on disk, persisting the region-bridge
+ * sidecar. First run writes the projection verbatim and seeds the bridge; re-runs
+ * source-wins regenerate any drifted/stale projected region. `dryRun` plans only.
  */
 export function reconcilePage(opts: {
   desiredContent: string;
   pageFile: string;
   sidecarFile: string;
   dryRun?: boolean;
-  prune?: boolean;
-  groundedRegions?: Set<string>;
 }): ReconcilePageResult {
-  const { desiredContent, pageFile, sidecarFile, dryRun, prune } = opts;
-  const groundedRegions = opts.groundedRegions ?? new Set();
+  const { desiredContent, pageFile, sidecarFile, dryRun } = opts;
   const prior: PriorState = existsSync(sidecarFile) ? JSON.parse(readFileSync(sidecarFile, 'utf8')) : {};
 
   if (!existsSync(pageFile)) {
@@ -255,11 +244,11 @@ export function reconcilePage(opts: {
       writeAtomic(sidecarFile, JSON.stringify(seed, null, 2));
     }
     const items = parseRegions(desiredContent, 'desired').map((r): ProjPlanItem => ({ id: r.id, verdict: 'create', reason: 'first projection' }));
-    return { firstRun: true, items, applied: [], created: items.map((i) => i.id), preserved: [], skipped: [], deleted: [], groundedDrift: [], pageFile, sidecarFile };
+    return { firstRun: true, items, created: items.map((i) => i.id), regenerated: [], removed: [], unchanged: [], handEdited: [], pageFile, sidecarFile };
   }
 
   const actual = readFileSync(pageFile, 'utf8');
-  const res = applyProjection(desiredContent, actual, prior, Boolean(prune), groundedRegions);
+  const res = applyProjection(desiredContent, actual, prior);
   if (!dryRun) {
     writeAtomic(pageFile, res.content);
     writeAtomic(sidecarFile, JSON.stringify(res.newPrior, null, 2));
@@ -267,12 +256,11 @@ export function reconcilePage(opts: {
   return {
     firstRun: false,
     items: res.items,
-    applied: res.applied,
     created: res.created,
-    preserved: res.preserved,
-    skipped: res.skipped,
-    deleted: res.deleted,
-    groundedDrift: res.groundedDrift,
+    regenerated: res.regenerated,
+    removed: res.removed,
+    unchanged: res.unchanged,
+    handEdited: res.handEdited,
     pageFile,
     sidecarFile,
   };
@@ -284,10 +272,9 @@ export type FaithfulnessGateResult =
   | { status: 'unenforced'; reason: string };
 
 /**
- * The GATE half of grounded flag+gate: shell out to the CANONICAL kb_cli
- * faithfulness-gate (never a reimplemented threshold — skill mandate). exit 3 →
- * refused (below citation-recall minimum). If kb_cli is absent/unusable, degrade to
- * 'unenforced' so the grounded-drift FLAG still stands as an advisory alarm.
+ * Grounding gate: shell out to the CANONICAL kb_cli faithfulness-gate (never a
+ * reimplemented threshold — skill mandate). exit 3 → refused (below citation-recall
+ * minimum). Degrades to 'unenforced' if kb_cli is absent.
  */
 export function faithfulnessGate(pageFile: string, faithfulnessMin: number, kbCli = 'kb_cli'): FaithfulnessGateResult {
   try {
@@ -309,11 +296,15 @@ export function faithfulnessGate(pageFile: string, faithfulnessMin: number, kbCl
   }
 }
 
+/** A source page is GROUNDED iff it carries a `citation-recall::` property (research-synthesized). */
+export function sourceIsGrounded(rawSource: string): boolean {
+  return /^\s*citation-recall::\s*[0-9]/m.test(rawSource);
+}
+
 /**
  * Project a real LogSeq source page to region-structured markdown via the REAL
  * transform (logseqToAstro.transformBody). Strips the leading LogSeq page-property
- * block (the loader normally lifts it into frontmatter). publishedSlugs/titleToSlug
- * default empty (unresolved wikilinks render as spans) unless supplied.
+ * block. publishedSlugs/titleToSlug default empty (unresolved wikilinks → spans).
  */
 export function projectSourcePage(
   rawSource: string,
@@ -329,8 +320,7 @@ export function projectSourcePage(
 
 /**
  * Resolve publishedSlugs + titleToSlug from a publish manifest — the SAME derivation
- * the loader uses (src/lib/loader.ts) — so `projectSourcePage` resolves `[[wikilinks]]`
- * to real `/kb/<slug>/` links instead of unresolved spans. (6ji.3 item 1.)
+ * the loader uses — so `projectSourcePage` resolves `[[wikilinks]]` to `/kb/<slug>/`.
  */
 export function slugMapsFromManifest(manifestPath: string): {
   publishedSlugs: Set<string>;
@@ -349,12 +339,14 @@ export interface ManifestEntrySummary {
   slug: string;
   error?: string;
   firstRun?: boolean;
-  applied?: string[];
   created?: string[];
-  deleted?: string[];
-  preserved?: string[];
-  groundedDrift?: string[];
-  skipped?: string[];
+  regenerated?: string[];
+  removed?: string[];
+  unchanged?: string[];
+  handEdited?: string[];
+  grounded?: boolean;
+  gate?: FaithfulnessGateResult;
+  excluded?: boolean;
 }
 
 export interface ReconcileManifestResult {
@@ -363,20 +355,20 @@ export interface ReconcileManifestResult {
 }
 
 /**
- * Batch reconcile: project every published manifest entry and reconcile it into a
- * config-driven output dir (`<outDir>/<slug>.md` + `<slug>.reconcile.json`). This is
- * the pipeline step (6ji.3 item 2) — the same per-page loop the loader walks, but
- * emitting editable, drift-preserving page files instead of Astro's in-memory store.
- * Output location is a parameter, hardcoding no repo (6ji.3 item 4: config-driven).
+ * Batch reconcile: project every published manifest entry and source-wins reconcile
+ * it into a config-driven output dir (`<outDir>/<slug>.md` + `<slug>.reconcile.json`).
+ * A GROUNDED source page (carries `citation-recall::`) is run through the canonical
+ * faithfulness gate when `faithfulnessMin` is set; a REFUSED page is excluded from
+ * the outward projection (matching PublishSubgraph Phase 5b).
  */
 export function reconcileManifest(opts: {
   manifestPath: string;
   outDir: string;
   graphPath?: string;
   dryRun?: boolean;
-  prune?: boolean;
+  faithfulnessMin?: number;
 }): ReconcileManifestResult {
-  const { manifestPath, outDir, dryRun, prune } = opts;
+  const { manifestPath, outDir, dryRun, faithfulnessMin } = opts;
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
     graphPath?: string;
     entries: Array<{ title: string; exclude?: boolean; file?: string }>;
@@ -393,26 +385,33 @@ export function reconcileManifest(opts: {
     if (!sourcePath) { entries.push({ title: entry.title, slug, error: `source not found in ${graphPages}` }); continue; }
     try {
       const raw = readFileSync(sourcePath, 'utf8');
-      const desiredContent = projectSourcePage(raw, publishedSlugs, titleToSlug);
-      const groundedRegions = parseGroundedRegions(raw);
+      const grounded = sourceIsGrounded(raw);
+
+      // Grounding gate: a below-bar grounded source is excluded from the outward projection.
+      let gate: FaithfulnessGateResult | undefined;
+      if (grounded && faithfulnessMin !== undefined) {
+        gate = faithfulnessGate(sourcePath, faithfulnessMin);
+        if (gate.status === 'refused') { entries.push({ title: entry.title, slug, grounded, gate, excluded: true }); continue; }
+      }
+
+      const desiredContent = stampProjected(projectSourcePage(raw, publishedSlugs, titleToSlug), entry.title);
       const res = reconcilePage({
         desiredContent,
         pageFile: join(outDir, `${slug}.md`),
         sidecarFile: join(outDir, `${slug}.reconcile.json`),
         dryRun,
-        prune,
-        groundedRegions,
       });
       entries.push({
         title: entry.title,
         slug,
         firstRun: res.firstRun,
-        applied: res.applied,
         created: res.created,
-        deleted: res.deleted,
-        preserved: res.preserved,
-        groundedDrift: res.groundedDrift,
-        skipped: res.skipped,
+        regenerated: res.regenerated,
+        removed: res.removed,
+        unchanged: res.unchanged,
+        handEdited: res.handEdited,
+        grounded,
+        gate,
       });
     } catch (err) {
       entries.push({ title: entry.title, slug, error: (err as Error).message.split('\n')[0] });

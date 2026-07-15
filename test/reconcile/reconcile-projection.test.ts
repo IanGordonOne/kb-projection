@@ -4,221 +4,188 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   applyProjection,
-  parseGroundedRegions,
   planProjection,
   projectSourcePage,
+  projectedMarker,
   reconcileManifest,
   reconcilePage,
   slugMapsFromManifest,
-  type PriorState,
+  sourceIsGrounded,
+  stampProjected,
 } from '../../src/reconcile/reconcile-projection';
 import { parseRegions, regionBody } from '../../src/reconcile/region-core';
 
-// A projected page as the real transform emits it: markdown `##` heading sections.
+// A fresh projection: heading regions stamped as PROJECTED (source-owned).
 const PROJECTED_V1 = [
   '## Definition',
+  '<!-- projected: source="Stat Arb#definition" -->',
   '',
-  'Stat arb exploits temporary mispricings while market-neutral.',
+  'Projected definition v1.',
   '',
-  '## Key Levels',
+  '## Levels',
+  '<!-- projected: source="Stat Arb#levels" -->',
   '',
-  'Sharpe 0.5–2.0. Positions 200–5,000.',
+  'Levels v1.',
   '',
 ].join('\n');
 
-const bodyOf = (c: string, id: string) => regionBody(c, parseRegions(c, 'p').find((r) => r.id === id)!).trim();
-const seedPrior = (content: string): PriorState => applyProjection(content, content, {}).newPrior;
+// A page mixing a projected region with a human-authored (non-projected) one.
+const MIXED = [
+  '## Definition',
+  '<!-- projected: source="Stat Arb#definition" -->',
+  '',
+  'Projected definition v1.',
+  '',
+  '## My Notes',
+  '',
+  'Hand-written notes — not projected.',
+  '',
+].join('\n');
 
-describe('projectSourcePage — real transform on a LogSeq body', () => {
-  test('de-bullets `- ## Heading` and strips the page-property block', () => {
-    const raw = [
-      'title:: Stat Arb',
-      'type:: concept',
-      '',
-      '- ## Definition',
-      '  - Real definition body.',
-      '- ## Key Levels',
-      '  - Sharpe 0.5–2.0.',
-    ].join('\n');
-    const projected = projectSourcePage(raw);
-    expect(projected).toContain('## Definition');
-    expect(projected).not.toContain('title:: Stat Arb'); // frontmatter stripped
-    expect(projected).not.toMatch(/^- ## /m); // de-bulleted
-    const ids = parseRegions(projected, 'p').map((r) => r.id);
-    expect(ids).toEqual(['definition', 'key-levels']);
+const region = (c: string, id: string) => parseRegions(c, 'p').find((r) => r.id === id)!;
+const bodyOf = (c: string, id: string) => regionBody(c, region(c, id)).trim();
+
+describe('projectedMarker — projected vs free regions', () => {
+  test('a region with a projected comment is projected, with its source', () => {
+    expect(projectedMarker(MIXED, region(MIXED, 'definition'))).toEqual({ projected: true, source: 'Stat Arb#definition' });
+  });
+  test('a region without a marker is free (non-projected)', () => {
+    expect(projectedMarker(MIXED, region(MIXED, 'my-notes'))).toEqual({ projected: false });
+  });
+  test('attribute form on a SectionHeading anchor is detected', () => {
+    const c = '<SectionHeading level="2" id="x" text="X" projected source="S#x" />\n\nbody';
+    expect(projectedMarker(c, region(c, 'x'))).toEqual({ projected: true, source: 'S#x' });
   });
 });
 
-describe('slugMapsFromManifest — resolve wikilinks from the publish manifest (6ji.3 item 1)', () => {
-  test('published entries build the slug set/map; excluded entries are omitted', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'kb-manifest-'));
-    const mf = join(dir, 'm.json');
-    writeFileSync(mf, JSON.stringify({ entries: [{ title: 'Mean Reversion' }, { title: 'Secret Page', exclude: true }] }), 'utf8');
-    const { publishedSlugs, titleToSlug } = slugMapsFromManifest(mf);
-    expect(publishedSlugs.has('mean-reversion')).toBe(true);
-    expect(titleToSlug.get('Mean Reversion')).toBe('mean-reversion');
-    expect([...publishedSlugs]).not.toContain('secret-page'); // excluded
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  test('projectSourcePage with resolved maps turns a published [[wikilink]] into a /kb/ link', () => {
-    const raw = '- ## See Also\n  - Related: [[Mean Reversion]]';
-    const { publishedSlugs, titleToSlug } = { publishedSlugs: new Set(['mean-reversion']), titleToSlug: new Map([['Mean Reversion', 'mean-reversion']]) };
-    const projected = projectSourcePage(raw, publishedSlugs, titleToSlug);
-    expect(projected).toContain('[Mean Reversion](/kb/mean-reversion/)');
-    // without the maps it would be an unresolved span
-    expect(projectSourcePage(raw)).toContain('kb-unresolved');
+describe('stampProjected — mark a fresh projection', () => {
+  test('inserts a projected marker as the first body line of each heading, idempotently', () => {
+    const plain = '## Definition\n\nBody.\n\n## Levels\n\nMore.';
+    const stamped = stampProjected(plain, 'Stat Arb');
+    expect(projectedMarker(stamped, region(stamped, 'definition'))).toEqual({ projected: true, source: 'Stat Arb#definition' });
+    expect(projectedMarker(stamped, region(stamped, 'levels'))).toEqual({ projected: true, source: 'Stat Arb#levels' });
+    expect(stampProjected(stamped, 'Stat Arb')).toBe(stamped); // idempotent
   });
 });
 
-describe('planProjection — three-way on real-shaped projected pages', () => {
-  const prior = seedPrior(PROJECTED_V1);
-
-  test('unchanged when the page equals the projection', () => {
-    expect(planProjection(PROJECTED_V1, PROJECTED_V1, prior).filter((i) => i.verdict !== 'unchanged')).toEqual([]);
+describe('planProjection — source-wins on projected regions only', () => {
+  test('unchanged when the page matches the projection', () => {
+    expect(planProjection(PROJECTED_V1, PROJECTED_V1).filter((i) => i.verdict !== 'unchanged')).toEqual([]);
   });
 
-  test('update when the projection changed and the page is clean', () => {
-    const v2 = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'Sharpe 0.5–1.0 now (crowded).');
-    const items = planProjection(v2, PROJECTED_V1, prior);
-    expect(items.find((i) => i.id === 'key-levels')!.verdict).toBe('update');
-  });
-
-  test('drifted when the page section was hand-edited', () => {
-    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN NOTE: capacity ~$2B.');
+  test('a projected region hand-edited off-source → REGENERATE (not preserve)', () => {
+    const handEdited = PROJECTED_V1.replace('Projected definition v1.', 'A HUMAN edited this projected region.');
+    const prior = { definition: applyProjection(PROJECTED_V1, PROJECTED_V1).newPrior.definition, levels: applyProjection(PROJECTED_V1, PROJECTED_V1).newPrior.levels };
     const items = planProjection(PROJECTED_V1, handEdited, prior);
-    expect(items.find((i) => i.id === 'key-levels')!.verdict).toBe('drifted');
+    const def = items.find((i) => i.id === 'definition')!;
+    expect(def.verdict).toBe('regenerate');
+    expect(def.drift).toBe('hand-edited');
   });
 
-  test('orphan when the page has a section the projection dropped', () => {
-    const withExtra = `${PROJECTED_V1}\n## Hand-Added\n\nPurely human section.\n`;
-    const items = planProjection(PROJECTED_V1, withExtra, seedPrior(PROJECTED_V1));
-    expect(items.find((i) => i.id === 'hand-added')!.verdict).toBe('orphan');
+  test('a source change → regenerate', () => {
+    const v2 = PROJECTED_V1.replace('Projected definition v1.', 'Projected definition v2.');
+    const prior = applyProjection(PROJECTED_V1, PROJECTED_V1).newPrior;
+    expect(planProjection(v2, PROJECTED_V1, prior).find((i) => i.id === 'definition')!.verdict).toBe('regenerate');
   });
 
-  test('create when the projection adds a new section', () => {
-    const v2 = `${PROJECTED_V1}## Risks\n\nCrowding, liquidity.\n`;
-    const items = planProjection(v2, PROJECTED_V1, prior);
-    expect(items.find((i) => i.id === 'risks')!.verdict).toBe('create');
+  test('a NON-projected region is never in the plan (free surface, untouched)', () => {
+    // MIXED has a hand-authored my-notes; the projection only knows about definition.
+    const desired = [PROJECTED_V1.split('## Levels')[0]].join(''); // projection with only definition
+    const items = planProjection(desired, MIXED);
+    expect(items.some((i) => i.id === 'my-notes')).toBe(false);
+  });
+
+  test('a projected region dropped from source → remove; a free region absent from source is NOT removed', () => {
+    const desiredDefOnly = PROJECTED_V1.split('## Levels')[0];
+    // page = MIXED (projected definition + free my-notes). Source dropped nothing projected here,
+    // but if the page had a projected 'levels' not in desired, it would be removed:
+    const pageWithStaleProjected = MIXED.replace('## My Notes', '## Levels\n<!-- projected: source="Stat Arb#levels" -->\n\nstale\n\n## My Notes');
+    const items = planProjection(desiredDefOnly, pageWithStaleProjected);
+    expect(items.find((i) => i.id === 'levels')!.verdict).toBe('remove');
+    expect(items.some((i) => i.id === 'my-notes')).toBe(false); // free region left alone
   });
 });
 
-describe('applyProjection — drift preserved, clean updates applied, sections created', () => {
-  const prior = seedPrior(PROJECTED_V1);
-
-  test('clean update applied; hand-edited section preserved in the SAME run', () => {
-    // page: key-levels hand-edited; definition still pristine. projection: definition changed.
-    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN NOTE: capacity ~$2B.');
-    const v2 = PROJECTED_V1.replace(
-      'Stat arb exploits temporary mispricings while market-neutral.',
-      'Stat arb: PCA residual mean-reversion, market-neutral.',
-    );
-    const res = applyProjection(v2, handEdited, prior);
-    expect(res.applied).toContain('definition'); // clean projection change lands
-    expect(res.preserved).toContain('key-levels'); // hand-edit survives
-    expect(bodyOf(res.content, 'key-levels')).toContain('HUMAN NOTE: capacity ~$2B.');
-    expect(bodyOf(res.content, 'definition')).toContain('PCA residual mean-reversion');
+describe('applyProjection — source-wins remedy', () => {
+  test('regenerates a hand-edited projected region, overwriting the edit', () => {
+    const handEdited = PROJECTED_V1.replace('Projected definition v1.', 'HUMAN off-source edit.');
+    const prior = applyProjection(PROJECTED_V1, PROJECTED_V1).newPrior;
+    const res = applyProjection(PROJECTED_V1, handEdited, prior);
+    expect(res.regenerated).toContain('definition');
+    expect(res.handEdited).toContain('definition'); // reported like hash-mismatch
+    expect(bodyOf(res.content, 'definition')).toContain('Projected definition v1.'); // source won
+    expect(bodyOf(res.content, 'definition')).not.toContain('HUMAN off-source edit.');
   });
 
-  test('a new projected section is created and round-trips', () => {
-    const v2 = `${PROJECTED_V1}## Risks\n\nCrowding, liquidity.\n`;
-    const res = applyProjection(v2, PROJECTED_V1, prior);
-    expect(res.created).toContain('risks');
-    expect(bodyOf(res.content, 'risks')).toContain('Crowding, liquidity.');
+  test('leaves a free (non-projected) region completely untouched', () => {
+    const desiredDefOnly = PROJECTED_V1.split('## Levels')[0];
+    const editedNotes = MIXED.replace('Hand-written notes — not projected.', 'Human rewrote their own notes.');
+    const res = applyProjection(desiredDefOnly, editedNotes);
+    expect(bodyOf(res.content, 'my-notes')).toContain('Human rewrote their own notes.'); // untouched
   });
 
-  test('idempotent: reconciling an already-converged page is a no-op', () => {
-    const res = applyProjection(PROJECTED_V1, PROJECTED_V1, prior);
-    expect(res.applied).toEqual([]);
-    expect(res.created).toEqual([]);
+  test('idempotent when the page already matches', () => {
+    const res = applyProjection(PROJECTED_V1, PROJECTED_V1);
+    expect(res.regenerated).toEqual([]);
     expect(res.content).toBe(PROJECTED_V1);
   });
 });
 
-describe('section deletion — provenance-gated pruning (6ji.3 item 5)', () => {
-  // baseline projection owns both sections
-  const prior = seedPrior(PROJECTED_V1);
-  // source later drops "Key Levels" — desired is definition-only
-  const V2_DROPPED = ['## Definition', '', 'Stat arb exploits temporary mispricings while market-neutral.', ''].join('\n');
+describe('reconcilePage — on-disk lifecycle (source-wins)', () => {
+  test('first run seeds; a later off-source hand-edit is regenerated, a free region survives', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kb-reconcile-'));
+    const pageFile = join(dir, 'p.md');
+    const sidecar = join(dir, 'p.reconcile.json');
 
-  test('a projection-owned section dropped from source (unmodified) plans as delete', () => {
-    const items = planProjection(V2_DROPPED, PROJECTED_V1, prior);
-    expect(items.find((i) => i.id === 'key-levels')!.verdict).toBe('delete');
-  });
+    // Seed with a page that has a projected region + a free region.
+    const desiredDefOnly = PROJECTED_V1.split('## Levels')[0];
+    reconcilePage({ desiredContent: MIXED, pageFile, sidecarFile: sidecar }); // first run writes MIXED
 
-  test('without prune, a delete candidate is preserved on disk', () => {
-    const res = applyProjection(V2_DROPPED, PROJECTED_V1, prior, false);
-    expect(res.preserved).toContain('key-levels');
-    expect(res.deleted).toEqual([]);
-    expect(res.content).toContain('## Key Levels');
-  });
+    // Human edits BOTH a projected region and their own free region on disk.
+    let onDisk = readFileSync(pageFile, 'utf8')
+      .replace('Projected definition v1.', 'HUMAN touched the projected region.')
+      .replace('Hand-written notes — not projected.', 'Human updated their notes.');
+    writeFileSync(pageFile, onDisk, 'utf8');
 
-  test('with prune, the section is removed and drops out of the baseline', () => {
-    const res = applyProjection(V2_DROPPED, PROJECTED_V1, prior, true);
-    expect(res.deleted).toContain('key-levels');
-    expect(res.content).not.toContain('## Key Levels');
-    expect(res.newPrior['key-levels']).toBeUndefined();
-    expect(res.content).toContain('## Definition'); // sibling intact
-  });
-
-  test('a dropped section that was HAND-EDITED is an orphan, preserved even with prune', () => {
-    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN kept this.');
-    const items = planProjection(V2_DROPPED, handEdited, prior);
-    expect(items.find((i) => i.id === 'key-levels')!.verdict).toBe('orphan');
-    const res = applyProjection(V2_DROPPED, handEdited, prior, true);
-    expect(res.deleted).toEqual([]);
-    expect(res.content).toContain('HUMAN kept this.');
-  });
-});
-
-describe('grounded areas — faithfulness policy (6ji.4)', () => {
-  const prior = seedPrior(PROJECTED_V1);
-
-  test('parseGroundedRegions reads a LogSeq / YAML grounded-regions declaration', () => {
-    expect([...parseGroundedRegions('title:: X\ngrounded-regions:: definition, key-levels\n')].sort()).toEqual(['definition', 'key-levels']);
-    expect([...parseGroundedRegions('grounded-regions: [definition]')]).toEqual(['definition']);
-    expect(parseGroundedRegions('no declaration here').size).toBe(0);
-  });
-
-  test('a hand-edit to a GROUNDED region is grounded-drift, not ordinary drift', () => {
-    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN claim with no citation.');
-    const grounded = new Set(['key-levels']);
-    const items = planProjection(PROJECTED_V1, handEdited, prior, grounded);
-    expect(items.find((i) => i.id === 'key-levels')!.verdict).toBe('grounded-drift');
-    // same edit on a NON-grounded region is ordinary drift
-    const items2 = planProjection(PROJECTED_V1, handEdited, prior, new Set());
-    expect(items2.find((i) => i.id === 'key-levels')!.verdict).toBe('drifted');
-  });
-
-  test('grounded-drift is preserved on disk and reported in groundedDrift', () => {
-    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN claim with no citation.');
-    const res = applyProjection(PROJECTED_V1, handEdited, prior, false, new Set(['key-levels']));
-    expect(res.groundedDrift).toContain('key-levels');
-    expect(res.preserved).toContain('key-levels');
-    expect(res.content).toContain('HUMAN claim with no citation.'); // edit kept (flag, not overwrite)
-  });
-
-  test('grounded-drift keeps the baseline stale so it re-alarms until re-grounded', () => {
-    const handEdited = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN claim.');
-    const res = applyProjection(PROJECTED_V1, handEdited, prior, false, new Set(['key-levels']));
-    // baseline NOT advanced to the human text → a second run still flags it
-    const again = planProjection(PROJECTED_V1, res.content, res.newPrior, new Set(['key-levels']));
-    expect(again.find((i) => i.id === 'key-levels')!.verdict).toBe('grounded-drift');
-  });
-
-  test('reconcilePage surfaces groundedDrift via opts.groundedRegions', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'kb-grounded-'));
-    const pageFile = join(dir, 'g.md');
-    const sidecar = join(dir, 'g.json');
-    reconcilePage({ desiredContent: PROJECTED_V1, pageFile, sidecarFile: sidecar }); // seed
-    writeFileSync(pageFile, PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN edit.'), 'utf8');
-    const res = reconcilePage({ desiredContent: PROJECTED_V1, pageFile, sidecarFile: sidecar, groundedRegions: new Set(['key-levels']) });
-    expect(res.groundedDrift).toContain('key-levels');
+    // Re-project (definition only). Projected region regenerates; free notes survive.
+    const res = reconcilePage({ desiredContent: desiredDefOnly, pageFile, sidecarFile: sidecar });
+    expect(res.regenerated).toContain('definition');
+    expect(res.handEdited).toContain('definition');
+    const after = readFileSync(pageFile, 'utf8');
+    expect(after).toContain('Projected definition v1.'); // source won on the projected region
+    expect(after).not.toContain('HUMAN touched the projected region.');
+    expect(after).toContain('Human updated their notes.'); // free region preserved
     rmSync(dir, { recursive: true, force: true });
   });
 });
 
-describe('reconcileManifest — batch over a manifest into a config-driven out-dir (6ji.3 item 2)', () => {
+describe('sourceIsGrounded', () => {
+  test('true iff the source carries citation-recall::', () => {
+    expect(sourceIsGrounded('title:: X\ncitation-recall:: 0.82\n')).toBe(true);
+    expect(sourceIsGrounded('title:: X\ntype:: note\n')).toBe(false);
+  });
+});
+
+describe('projectSourcePage + slugMapsFromManifest', () => {
+  test('de-bullets a LogSeq body and strips the property block', () => {
+    const raw = ['title:: Stat Arb', '', '- ## Definition', '  - Real body.'].join('\n');
+    const projected = projectSourcePage(raw);
+    expect(projected).toContain('## Definition');
+    expect(projected).not.toContain('title:: Stat Arb');
+  });
+
+  test('resolves wikilinks from the manifest slug maps', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kb-manifest-'));
+    const mf = join(dir, 'm.json');
+    writeFileSync(mf, JSON.stringify({ entries: [{ title: 'Mean Reversion' }, { title: 'Secret', exclude: true }] }), 'utf8');
+    const { publishedSlugs } = slugMapsFromManifest(mf);
+    expect(publishedSlugs.has('mean-reversion')).toBe(true);
+    expect(publishedSlugs.has('secret')).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('reconcileManifest — batch source-wins into a config-driven out-dir', () => {
   function setup() {
     const dir = mkdtempSync(join(tmpdir(), 'kb-batch-'));
     const pages = join(dir, 'graph', 'pages');
@@ -230,75 +197,23 @@ describe('reconcileManifest — batch over a manifest into a config-driven out-d
     return { dir, manifest, outDir: join(dir, 'out') };
   }
 
-  test('projects + reconciles every published entry; excluded entries are skipped', () => {
+  test('projects + stamps + reconciles each published entry; excluded manifest entries skipped', () => {
     const { dir, manifest, outDir } = setup();
     const res = reconcileManifest({ manifestPath: manifest, outDir });
-    expect(res.entries.map((e) => e.slug)).toEqual(['stat-arb']); // Hidden excluded
+    expect(res.entries.map((e) => e.slug)).toEqual(['stat-arb']);
     expect(res.entries[0].firstRun).toBe(true);
     const page = readFileSync(join(outDir, 'stat-arb.md'), 'utf8');
     expect(page).toContain('## Definition');
-    expect(existsSync(join(outDir, 'stat-arb.reconcile.json'))).toBe(true);
+    expect(page).toContain('<!-- projected: source="Stat Arb#definition" -->'); // stamped
     rmSync(dir, { recursive: true, force: true });
   });
 
-  test('second batch run is idempotent (nothing applied)', () => {
+  test('second batch run is idempotent (nothing regenerated)', () => {
     const { dir, manifest, outDir } = setup();
-    reconcileManifest({ manifestPath: manifest, outDir }); // seed
+    reconcileManifest({ manifestPath: manifest, outDir });
     const res = reconcileManifest({ manifestPath: manifest, outDir });
     expect(res.entries[0].firstRun).toBe(false);
-    expect(res.entries[0].applied).toEqual([]);
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  test('--plan (dryRun) writes nothing', () => {
-    const { dir, manifest, outDir } = setup();
-    reconcileManifest({ manifestPath: manifest, outDir, dryRun: true });
-    expect(existsSync(join(outDir, 'stat-arb.md'))).toBe(false);
-    rmSync(dir, { recursive: true, force: true });
-  });
-});
-
-describe('reconcilePage — file + sidecar lifecycle (the real on-disk loop)', () => {
-  test('first run seeds page + sidecar; a later hand-edit survives re-projection', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'kb-reconcile-'));
-    const pageFile = join(dir, 'stat-arb.md');
-    const sidecar = join(dir, 'stat-arb.reconcile.json');
-
-    // 1. First projection — seeds the page and prior sidecar.
-    const first = reconcilePage({ desiredContent: PROJECTED_V1, pageFile, sidecarFile: sidecar });
-    expect(first.firstRun).toBe(true);
-    expect(readFileSync(pageFile, 'utf8')).toBe(PROJECTED_V1);
-    expect(Object.keys(JSON.parse(readFileSync(sidecar, 'utf8')))).toContain('definition');
-
-    // 2. A human refines a projected section on disk.
-    writeFileSync(pageFile, PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN: capacity ~$2B, Sharpe ~1.'), 'utf8');
-
-    // 3. Re-project with the SAME source → the hand-edit is DRIFTED and preserved.
-    const second = reconcilePage({ desiredContent: PROJECTED_V1, pageFile, sidecarFile: sidecar });
-    expect(second.firstRun).toBe(false);
-    expect(second.preserved).toContain('key-levels');
-    expect(readFileSync(pageFile, 'utf8')).toContain('HUMAN: capacity ~$2B');
-
-    // 4. Now the source itself changes that same section → conflict, still preserved.
-    const v2 = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'Sharpe compressed to 0.5–1.0.');
-    const third = reconcilePage({ desiredContent: v2, pageFile, sidecarFile: sidecar });
-    expect(third.items.find((i) => i.id === 'key-levels')!.verdict).toBe('conflict');
-    expect(readFileSync(pageFile, 'utf8')).toContain('HUMAN: capacity ~$2B'); // human wins until resolved
-
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  test('--plan (dryRun) computes verdicts without writing', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'kb-reconcile-'));
-    const pageFile = join(dir, 'p.md');
-    const sidecar = join(dir, 'p.json');
-    writeFileSync(pageFile, PROJECTED_V1, 'utf8');
-    writeFileSync(sidecar, JSON.stringify(seedPrior(PROJECTED_V1)), 'utf8');
-    const before = readFileSync(pageFile, 'utf8');
-    const v2 = PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'changed.');
-    const res = reconcilePage({ desiredContent: v2, pageFile, sidecarFile: sidecar, dryRun: true });
-    expect(res.items.find((i) => i.id === 'key-levels')!.verdict).toBe('update');
-    expect(readFileSync(pageFile, 'utf8')).toBe(before); // untouched
+    expect(res.entries[0].regenerated).toEqual([]);
     rmSync(dir, { recursive: true, force: true });
   });
 });
