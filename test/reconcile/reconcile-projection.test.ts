@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,6 +7,7 @@ import {
   parseGroundedRegions,
   planProjection,
   projectSourcePage,
+  reconcileManifest,
   reconcilePage,
   slugMapsFromManifest,
   type PriorState,
@@ -213,6 +214,46 @@ describe('grounded areas — faithfulness policy (6ji.4)', () => {
     writeFileSync(pageFile, PROJECTED_V1.replace('Sharpe 0.5–2.0. Positions 200–5,000.', 'HUMAN edit.'), 'utf8');
     const res = reconcilePage({ desiredContent: PROJECTED_V1, pageFile, sidecarFile: sidecar, groundedRegions: new Set(['key-levels']) });
     expect(res.groundedDrift).toContain('key-levels');
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('reconcileManifest — batch over a manifest into a config-driven out-dir (6ji.3 item 2)', () => {
+  function setup() {
+    const dir = mkdtempSync(join(tmpdir(), 'kb-batch-'));
+    const pages = join(dir, 'graph', 'pages');
+    mkdirSync(pages, { recursive: true });
+    writeFileSync(join(pages, 'Stat Arb.md'), ['title:: Stat Arb', '- ## Definition', '  - Stat arb body.', '- ## Levels', '  - Levels body.'].join('\n'), 'utf8');
+    writeFileSync(join(pages, 'Hidden.md'), ['title:: Hidden', '- ## Secret', '  - nope.'].join('\n'), 'utf8');
+    const manifest = join(dir, 'm.json');
+    writeFileSync(manifest, JSON.stringify({ graphPath: join(dir, 'graph'), entries: [{ title: 'Stat Arb' }, { title: 'Hidden', exclude: true }] }), 'utf8');
+    return { dir, manifest, outDir: join(dir, 'out') };
+  }
+
+  test('projects + reconciles every published entry; excluded entries are skipped', () => {
+    const { dir, manifest, outDir } = setup();
+    const res = reconcileManifest({ manifestPath: manifest, outDir });
+    expect(res.entries.map((e) => e.slug)).toEqual(['stat-arb']); // Hidden excluded
+    expect(res.entries[0].firstRun).toBe(true);
+    const page = readFileSync(join(outDir, 'stat-arb.md'), 'utf8');
+    expect(page).toContain('## Definition');
+    expect(existsSync(join(outDir, 'stat-arb.reconcile.json'))).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('second batch run is idempotent (nothing applied)', () => {
+    const { dir, manifest, outDir } = setup();
+    reconcileManifest({ manifestPath: manifest, outDir }); // seed
+    const res = reconcileManifest({ manifestPath: manifest, outDir });
+    expect(res.entries[0].firstRun).toBe(false);
+    expect(res.entries[0].applied).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test('--plan (dryRun) writes nothing', () => {
+    const { dir, manifest, outDir } = setup();
+    reconcileManifest({ manifestPath: manifest, outDir, dryRun: true });
+    expect(existsSync(join(outDir, 'stat-arb.md'))).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 });

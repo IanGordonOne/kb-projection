@@ -20,24 +20,62 @@
  *      gate exits 3 so CI can block outward projection.)
  *   bun run bin/kb-reconcile.ts --desired <projected.md> --page <target.md> ...
  *     (--desired supplies already-projected content directly, skipping transform)
+ *   bun run bin/kb-reconcile.ts --all --manifest <manifest.json> --out-dir <dir>
+ *                               [--graph <path>] [--plan] [--prune] [--json]
+ *     (batch: project + reconcile every published entry into <out-dir>/<slug>.md)
  *
  * Exit codes: 0 ok · 2 usage error
  */
 import { existsSync, readFileSync } from 'node:fs';
-import { faithfulnessGate, parseGroundedRegions, projectSourcePage, reconcilePage, slugMapsFromManifest } from '../src/reconcile/reconcile-projection';
+import { faithfulnessGate, parseGroundedRegions, projectSourcePage, reconcileManifest, reconcilePage, slugMapsFromManifest } from '../src/reconcile/reconcile-projection';
 
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--plan' || a === '--json' || a === '--prune') out[a.slice(2)] = true;
+    if (a === '--plan' || a === '--json' || a === '--prune' || a === '--all') out[a.slice(2)] = true;
     else if (a.startsWith('--')) out[a.slice(2)] = argv[++i];
   }
   return out;
 }
 
+function runBatch(args: Record<string, string | boolean>): number {
+  const manifest = args.manifest as string | undefined;
+  const outDir = args['out-dir'] as string | undefined;
+  if (!manifest || !outDir) { process.stderr.write('usage: kb-reconcile --all --manifest <manifest.json> --out-dir <dir> [--graph <path>] [--plan] [--prune] [--json]\n'); return 2; }
+  if (!existsSync(manifest)) { process.stderr.write(`not found: ${manifest}\n`); return 2; }
+  const res = reconcileManifest({
+    manifestPath: manifest,
+    outDir,
+    graphPath: args.graph as string | undefined,
+    dryRun: Boolean(args.plan),
+    prune: Boolean(args.prune),
+  });
+  if (args.json) { console.log(JSON.stringify(res, null, 2)); return res.entries.some((e) => e.groundedDrift?.length) ? 0 : 0; }
+
+  console.log(`# kb-reconcile --all ${args.plan ? 'PLAN (dry-run)' : ''} → ${res.outDir}  (${res.entries.length} entries)`);
+  let errs = 0;
+  let drift = 0;
+  for (const e of res.entries) {
+    if (e.error) { console.log(`  ✗ ${e.slug.padEnd(32)} ${e.error}`); errs++; continue; }
+    const bits = [
+      e.firstRun ? 'first' : '',
+      e.applied?.length ? `applied=${e.applied.length}` : '',
+      e.created?.length ? `created=${e.created.length}` : '',
+      e.deleted?.length ? `deleted=${e.deleted.length}` : '',
+      e.preserved?.length ? `preserved=${e.preserved.length}` : '',
+      e.groundedDrift?.length ? `grounded-drift=${e.groundedDrift.length}` : '',
+    ].filter(Boolean).join(' · ') || 'unchanged';
+    if (e.groundedDrift?.length) drift++;
+    console.log(`  ${e.groundedDrift?.length ? '⚠' : '·'} ${e.slug.padEnd(32)} ${bits}`);
+  }
+  console.log(`\n${res.entries.length - errs} ok · ${errs} error · ${drift} with grounded-drift${args.plan ? '  (no writes)' : ''}`);
+  return errs ? 1 : 0;
+}
+
 function main(): number {
   const args = parseArgs(process.argv.slice(2));
+  if (args.all) return runBatch(args);
   const page = args.page as string;
   const source = args.source as string;
   const desiredFile = args.desired as string;

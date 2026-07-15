@@ -16,7 +16,9 @@
  */
 import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
   createRegionAfter,
   hashRegionBody,
@@ -27,7 +29,7 @@ import {
   regionSpan,
   replaceRegionBody,
 } from './region-core';
-import { transformBody } from '../lib/logseqToAstro';
+import { resolveLogseqPath, transformBody } from '../lib/logseqToAstro';
 import { slugify } from '../lib/logseq-primitives';
 
 export type ProjVerdict = 'create' | 'update' | 'unchanged' | 'drifted' | 'conflict' | 'orphan' | 'delete' | 'grounded-drift';
@@ -340,4 +342,81 @@ export function slugMapsFromManifest(manifestPath: string): {
     publishedSlugs: new Set(published.map((e) => slugify(e.title))),
     titleToSlug: new Map(published.map((e) => [e.title, slugify(e.title)] as const)),
   };
+}
+
+export interface ManifestEntrySummary {
+  title: string;
+  slug: string;
+  error?: string;
+  firstRun?: boolean;
+  applied?: string[];
+  created?: string[];
+  deleted?: string[];
+  preserved?: string[];
+  groundedDrift?: string[];
+  skipped?: string[];
+}
+
+export interface ReconcileManifestResult {
+  outDir: string;
+  entries: ManifestEntrySummary[];
+}
+
+/**
+ * Batch reconcile: project every published manifest entry and reconcile it into a
+ * config-driven output dir (`<outDir>/<slug>.md` + `<slug>.reconcile.json`). This is
+ * the pipeline step (6ji.3 item 2) — the same per-page loop the loader walks, but
+ * emitting editable, drift-preserving page files instead of Astro's in-memory store.
+ * Output location is a parameter, hardcoding no repo (6ji.3 item 4: config-driven).
+ */
+export function reconcileManifest(opts: {
+  manifestPath: string;
+  outDir: string;
+  graphPath?: string;
+  dryRun?: boolean;
+  prune?: boolean;
+}): ReconcileManifestResult {
+  const { manifestPath, outDir, dryRun, prune } = opts;
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    graphPath?: string;
+    entries: Array<{ title: string; exclude?: boolean; file?: string }>;
+  };
+  const graphPages = join(opts.graphPath ?? manifest.graphPath ?? join(homedir(), 'Logseq', 'MyGraph'), 'pages');
+  const { publishedSlugs, titleToSlug } = slugMapsFromManifest(manifestPath);
+  const published = (manifest.entries ?? []).filter((e) => !e.exclude);
+  if (!dryRun) mkdirSync(outDir, { recursive: true });
+
+  const entries: ManifestEntrySummary[] = [];
+  for (const entry of published) {
+    const slug = slugify(entry.title);
+    const sourcePath = resolveLogseqPath(entry as Parameters<typeof resolveLogseqPath>[0], graphPages);
+    if (!sourcePath) { entries.push({ title: entry.title, slug, error: `source not found in ${graphPages}` }); continue; }
+    try {
+      const raw = readFileSync(sourcePath, 'utf8');
+      const desiredContent = projectSourcePage(raw, publishedSlugs, titleToSlug);
+      const groundedRegions = parseGroundedRegions(raw);
+      const res = reconcilePage({
+        desiredContent,
+        pageFile: join(outDir, `${slug}.md`),
+        sidecarFile: join(outDir, `${slug}.reconcile.json`),
+        dryRun,
+        prune,
+        groundedRegions,
+      });
+      entries.push({
+        title: entry.title,
+        slug,
+        firstRun: res.firstRun,
+        applied: res.applied,
+        created: res.created,
+        deleted: res.deleted,
+        preserved: res.preserved,
+        groundedDrift: res.groundedDrift,
+        skipped: res.skipped,
+      });
+    } catch (err) {
+      entries.push({ title: entry.title, slug, error: (err as Error).message.split('\n')[0] });
+    }
+  }
+  return { outDir, entries };
 }
