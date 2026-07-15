@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import {
   createRegionAfter,
   hashRegionBody,
+  moveRegion,
   parseRegions,
   regionBody,
   type Region,
@@ -145,6 +146,49 @@ export function planProjection(desiredContent: string, actualContent: string, pr
   return items;
 }
 
+/** Regions not contained within another region's span (outermost sections). */
+function topLevelRegions(regions: Region[]): Region[] {
+  return regions.filter((r) => {
+    const [rs, re] = regionSpan(r);
+    return !regions.some((o) => {
+      if (o === r) return false;
+      const [os, oe] = regionSpan(o);
+      return os <= rs && re <= oe && (os < rs || re < oe);
+    });
+  });
+}
+
+/**
+ * Reorder PROJECTED top-level regions to match the source (desired) order, source-wins
+ * (kb-projection-6ji.5). Only projected regions move; free non-projected regions are
+ * never repositioned by this pass. A moved region carries its whole span (nested
+ * subsections + preserved body) — reorder changes position, never content.
+ */
+export function reorderProjected(content: string, desiredContent: string): { content: string; moved: string[] } {
+  const desiredTop = topLevelRegions(parseRegions(desiredContent, 'd')).map((r) => r.id);
+  const pageTop = topLevelRegions(parseRegions(content, 'p'));
+  const projected = new Set(pageTop.filter((r) => projectedMarker(content, r).projected).map((r) => r.id));
+  const target = desiredTop.filter((id) => projected.has(id));
+  if (target.length < 2) return { content, moved: [] };
+  const current = pageTop.map((r) => r.id).filter((id) => projected.has(id));
+  if (current.join(' ') === target.join(' ')) return { content, moved: [] };
+
+  let c = content;
+  const moved = new Set<string>();
+  // Place each projected region after its predecessor in target order (L-to-R sorts).
+  for (let i = 1; i < target.length; i++) {
+    const regions = topLevelRegions(parseRegions(c, 'p'));
+    const ids = regions.map((r) => r.id);
+    const prev = regions.find((r) => r.id === target[i - 1]);
+    const cur = regions.find((r) => r.id === target[i]);
+    if (!prev || !cur) continue;
+    if (ids.indexOf(cur.id) > ids.indexOf(prev.id)) continue; // already after
+    const res = moveRegion(c, cur, prev, 'after');
+    if (res.status === 'ok') { c = res.content; moved.add(cur.id); }
+  }
+  return { content: c, moved: [...moved] };
+}
+
 export interface ApplyProjectionResult {
   content: string;
   items: ProjPlanItem[];
@@ -153,12 +197,18 @@ export interface ApplyProjectionResult {
   regenerated: string[];
   removed: string[];
   unchanged: string[];
+  /** Projected regions repositioned to match source order (source-wins; 6ji.5). */
+  reordered: string[];
   /** Projected regions that drifted (hand-edited off-source) — reported like healthMonitor's hash-mismatch. */
   handEdited: string[];
 }
 
-/** Apply the plan: source-wins regenerate divergent projected regions, create absent ones, remove dropped ones. */
-export function applyProjection(desiredContent: string, actualContent: string, prior: PriorState = {}): ApplyProjectionResult {
+/**
+ * Apply the plan: source-wins regenerate divergent projected regions, create absent
+ * ones, remove dropped ones, then (when `reorder`, default on) reposition projected
+ * regions to match source order. Free non-projected regions are never touched.
+ */
+export function applyProjection(desiredContent: string, actualContent: string, prior: PriorState = {}, reorder = true): ApplyProjectionResult {
   const items = planProjection(desiredContent, actualContent, prior);
   const desired = parseRegions(desiredContent, 'desired');
   const desiredById = new Map(desired.map((r) => [r.id, r] as const));
@@ -193,6 +243,10 @@ export function applyProjection(desiredContent: string, actualContent: string, p
   }
   for (const it of items.filter((i) => i.verdict === 'unchanged')) unchanged.push(it.id);
 
+  // Reorder projected regions to source order AFTER create/remove settle (6ji.5).
+  let reordered: string[] = [];
+  if (reorder) { const r = reorderProjected(content, desiredContent); content = r.content; reordered = r.moved; }
+
   // Prior advances to the fresh-projection hash for every projected region now present
   // (post-regenerate they are all in sync). Removed regions leave the bridge.
   const newPrior: PriorState = { ...prior };
@@ -201,7 +255,7 @@ export function applyProjection(desiredContent: string, actualContent: string, p
   for (const id of removed) delete newPrior[id];
 
   const handEdited = items.filter((i) => i.drift === 'hand-edited' || i.drift === 'both').map((i) => i.id);
-  return { content, items, newPrior, created, regenerated, removed, unchanged, handEdited };
+  return { content, items, newPrior, created, regenerated, removed, unchanged, reordered, handEdited };
 }
 
 export interface ReconcilePageResult {
@@ -211,6 +265,7 @@ export interface ReconcilePageResult {
   regenerated: string[];
   removed: string[];
   unchanged: string[];
+  reordered: string[];
   handEdited: string[];
   pageFile: string;
   sidecarFile: string;
@@ -244,7 +299,7 @@ export function reconcilePage(opts: {
       writeAtomic(sidecarFile, JSON.stringify(seed, null, 2));
     }
     const items = parseRegions(desiredContent, 'desired').map((r): ProjPlanItem => ({ id: r.id, verdict: 'create', reason: 'first projection' }));
-    return { firstRun: true, items, created: items.map((i) => i.id), regenerated: [], removed: [], unchanged: [], handEdited: [], pageFile, sidecarFile };
+    return { firstRun: true, items, created: items.map((i) => i.id), regenerated: [], removed: [], unchanged: [], reordered: [], handEdited: [], pageFile, sidecarFile };
   }
 
   const actual = readFileSync(pageFile, 'utf8');
@@ -260,6 +315,7 @@ export function reconcilePage(opts: {
     regenerated: res.regenerated,
     removed: res.removed,
     unchanged: res.unchanged,
+    reordered: res.reordered,
     handEdited: res.handEdited,
     pageFile,
     sidecarFile,
@@ -343,6 +399,7 @@ export interface ManifestEntrySummary {
   regenerated?: string[];
   removed?: string[];
   unchanged?: string[];
+  reordered?: string[];
   handEdited?: string[];
   grounded?: boolean;
   gate?: FaithfulnessGateResult;
@@ -409,6 +466,7 @@ export function reconcileManifest(opts: {
         regenerated: res.regenerated,
         removed: res.removed,
         unchanged: res.unchanged,
+        reordered: res.reordered,
         handEdited: res.handEdited,
         grounded,
         gate,

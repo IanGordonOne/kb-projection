@@ -64,6 +64,7 @@ function runBatch(args: Record<string, string | boolean>): number {
       e.created?.length ? `created=${e.created.length}` : '',
       e.regenerated?.length ? `regenerated=${e.regenerated.length}` : '',
       e.removed?.length ? `removed=${e.removed.length}` : '',
+      e.reordered?.length ? `reordered=${e.reordered.length}` : '',
       e.handEdited?.length ? `hand-edited=${e.handEdited.length}` : '',
       e.grounded ? 'grounded' : '',
     ].filter(Boolean).join(' · ') || 'unchanged';
@@ -119,7 +120,7 @@ function main(): number {
     console.log(`  ${it.verdict.toUpperCase().padEnd(11)} ${it.id.padEnd(28)} ${it.reason}`);
   }
   const tally = (label: string, xs: string[]) => (xs.length ? `${label}=${xs.length}` : '');
-  console.log('\n' + [tally('created', res.created), tally('regenerated', res.regenerated), tally('removed', res.removed), tally('unchanged', res.unchanged)].filter(Boolean).join(' · ') + (args.plan ? '  (no writes)' : ''));
+  console.log('\n' + [tally('created', res.created), tally('regenerated', res.regenerated), tally('removed', res.removed), tally('reordered', res.reordered), tally('unchanged', res.unchanged)].filter(Boolean).join(' · ') + (args.plan ? '  (no writes)' : ''));
   if (res.handEdited.length) console.log(`\n⚠ OFF-SOURCE HAND-EDITS regenerated (source-wins): ${res.handEdited.join(', ')} — fix at source (WriteBackBlock/LogSeq), not on the projected page.`);
   return 0;
 }

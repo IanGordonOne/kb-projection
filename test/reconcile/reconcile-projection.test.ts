@@ -9,6 +9,7 @@ import {
   projectedMarker,
   reconcileManifest,
   reconcilePage,
+  reorderProjected,
   slugMapsFromManifest,
   sourceIsGrounded,
   stampProjected,
@@ -156,6 +157,56 @@ describe('reconcilePage — on-disk lifecycle (source-wins)', () => {
     expect(after).not.toContain('HUMAN touched the projected region.');
     expect(after).toContain('Human updated their notes.'); // free region preserved
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('reorderProjected — projected regions to source order (6ji.5)', () => {
+  // desired (source) order: definition, then levels.
+  const desired = PROJECTED_V1;
+  // page has them SWAPPED (levels before definition), plus a free region between.
+  const swapped = [
+    '## Levels',
+    '<!-- projected: source="Stat Arb#levels" -->',
+    '',
+    'Levels v1.',
+    '',
+    '## My Notes',
+    '',
+    'Free human region.',
+    '',
+    '## Definition',
+    '<!-- projected: source="Stat Arb#definition" -->',
+    '',
+    'Projected definition v1.',
+    '',
+  ].join('\n');
+
+  test('reorders projected regions to match source order', () => {
+    const { content, moved } = reorderProjected(swapped, desired);
+    expect(content.indexOf('## Definition')).toBeLessThan(content.indexOf('## Levels'));
+    expect(moved.length).toBeGreaterThan(0); // a projected region was repositioned
+    // content of the reordered region is intact
+    expect(content).toContain('Projected definition v1.');
+  });
+
+  test('does NOT move a free (non-projected) region', () => {
+    const { content } = reorderProjected(swapped, desired);
+    expect(content).toContain('Free human region.'); // survives
+    // my-notes was never a reorder candidate (not projected)
+    expect(reorderProjected(swapped, desired).moved).not.toContain('my-notes');
+  });
+
+  test('no-op when projected regions are already in source order', () => {
+    const { content, moved } = reorderProjected(PROJECTED_V1, PROJECTED_V1);
+    expect(moved).toEqual([]);
+    expect(content).toBe(PROJECTED_V1);
+  });
+
+  test('applyProjection reorders projected regions and reports them', () => {
+    const res = applyProjection(desired, swapped);
+    expect(res.reordered.length).toBeGreaterThan(0);
+    expect(res.content.indexOf('## Definition')).toBeLessThan(res.content.indexOf('## Levels'));
+    expect(res.content).toContain('Free human region.'); // free region survives
   });
 });
 
