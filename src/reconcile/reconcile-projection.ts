@@ -36,6 +36,7 @@ import {
   regionSpan,
   replaceRegionBody,
 } from './region-core';
+import { scoreRegionRecall, type PageRecall } from './region-recall';
 import { resolveLogseqPath, transformBody } from '../lib/logseqToAstro';
 import { slugify } from '../lib/logseq-primitives';
 
@@ -475,6 +476,7 @@ export interface ManifestEntrySummary {
   reordered?: string[];
   handEdited?: string[];
   grounded?: boolean;
+  regionRecall?: PageRecall;
   gate?: FaithfulnessGateResult;
   excluded?: boolean;
 }
@@ -516,15 +518,19 @@ export function reconcileManifest(opts: {
     try {
       const raw = readFileSync(sourcePath, 'utf8');
       const grounded = sourceIsGrounded(raw);
+      const desiredContent = stampProjected(projectSourcePage(raw, publishedSlugs, titleToSlug), entry.title);
+      const regionRecall = grounded ? scoreRegionRecall(desiredContent, slug) : undefined;
 
       // Grounding gate: a below-bar grounded source is excluded from the outward projection.
       let gate: FaithfulnessGateResult | undefined;
       if (grounded && faithfulnessMin !== undefined) {
         gate = faithfulnessGate(sourcePath, faithfulnessMin);
-        if (gate.status === 'refused') { entries.push({ title: entry.title, slug, grounded, gate, excluded: true }); continue; }
+        if (gate.status === 'refused') {
+          entries.push({ title: entry.title, slug, grounded, regionRecall, gate, excluded: true });
+          continue;
+        }
       }
 
-      const desiredContent = stampProjected(projectSourcePage(raw, publishedSlugs, titleToSlug), entry.title);
       const res = reconcilePage({
         desiredContent,
         pageFile: join(outDir, `${slug}.md`),
@@ -542,6 +548,7 @@ export function reconcileManifest(opts: {
         reordered: res.reordered,
         handEdited: res.handEdited,
         grounded,
+        regionRecall,
         gate,
       });
     } catch (err) {
