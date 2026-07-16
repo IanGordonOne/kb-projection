@@ -126,6 +126,22 @@ function owningRegion(lineIndex: number, regions: RegionEntry[]): RegionEntry | 
   return owner;
 }
 
+/**
+ * One-line display of a PageRecall for the CLI text reporter (kb-projection-6ji.9):
+ * the page roll-up plus a per-region breakdown for every heading/fence region that
+ * carries findings. ROOT is omitted from the breakdown — when it is the only
+ * finding-bearing region (today's corpus) it equals the page number, so the roll-up
+ * already shows it; when sub-regions exist, they are the interesting part. Display
+ * only — `PageRecall` remains the number of truth.
+ */
+export function formatPageRecall(page: PageRecall): string {
+  const fmt = (cited: number, total: number): string => `${cited}/${total}=${total ? (cited / total).toFixed(2) : 'n/a'}`;
+  const perRegion = page.regions
+    .filter((r) => r.total > 0 && r.id !== ROOT_REGION_ID)
+    .map((r) => `${r.id} ${fmt(r.cited, r.total)}`);
+  return `recall ${fmt(page.cited, page.total)}${perRegion.length ? ` · ${perRegion.join(' · ')}` : ''}`;
+}
+
 /** Global [^key] → finding UUID map from the projected page's `- Citations` block. */
 export function resolveCitationMap(projectedContent: string): Map<string, string> {
   const citationMap = new Map<string, string>();

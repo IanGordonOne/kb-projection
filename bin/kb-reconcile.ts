@@ -32,6 +32,7 @@ import {
   sourceIsGrounded,
   stampProjected,
 } from '../src/reconcile/reconcile-projection';
+import { formatPageRecall, scoreRegionRecall } from '../src/reconcile/region-recall';
 
 function parseArgs(argv: string[]): Record<string, string | boolean> {
   const out: Record<string, string | boolean> = {};
@@ -103,6 +104,7 @@ function runBatch(args: Record<string, string | boolean>): number {
       e.reordered?.length ? `reordered=${e.reordered.length}` : '',
       e.handEdited?.length ? `hand-edited=${e.handEdited.length}` : '',
       e.grounded ? 'grounded' : '',
+      e.grounded && e.regionRecall ? formatPageRecall(e.regionRecall) : '',
     ].filter(Boolean).join(' · ') || 'unchanged';
     if (e.handEdited?.length) drift++;
     console.log(`  ${e.handEdited?.length ? '⚠' : '·'} ${e.slug.padEnd(32)} ${bits}`);
@@ -148,7 +150,8 @@ function main(): number {
   }
 
   const res = reconcilePage({ desiredContent, pageFile: page, sidecarFile: sidecar, dryRun: Boolean(args.plan) });
-  if (args.json) { console.log(JSON.stringify({ ...res, grounded }, null, 2)); return 0; }
+  const regionRecall = grounded ? scoreRegionRecall(desiredContent, basename(page)) : undefined;
+  if (args.json) { console.log(JSON.stringify({ ...res, grounded, regionRecall }, null, 2)); return 0; }
 
   const order: Record<string, number> = { remove: 0, regenerate: 1, create: 2, unchanged: 3 };
   const mode = args.plan ? 'PLAN (dry-run)' : res.firstRun ? 'FIRST PROJECTION' : 'RECONCILE';
@@ -158,6 +161,7 @@ function main(): number {
   }
   const tally = (label: string, xs: string[]) => (xs.length ? `${label}=${xs.length}` : '');
   console.log('\n' + [tally('created', res.created), tally('regenerated', res.regenerated), tally('removed', res.removed), tally('reordered', res.reordered), tally('unchanged', res.unchanged)].filter(Boolean).join(' · ') + (args.plan ? '  (no writes)' : ''));
+  if (regionRecall) console.log(formatPageRecall(regionRecall));
   if (res.handEdited.length) console.log(`\n⚠ OFF-SOURCE HAND-EDITS regenerated (source-wins): ${res.handEdited.join(', ')} — fix at source (WriteBackBlock/LogSeq), not on the projected page.`);
   return 0;
 }

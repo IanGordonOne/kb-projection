@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ROOT_REGION_ID,
+  formatPageRecall,
   resolveCitationMap,
   scoreRegionRecall,
   type PageRecall,
@@ -410,5 +411,38 @@ describe('P4-audit — hard-to-vary rules that the §5 suite under-locked', () =
   test('CITE_DEF does not truncate a longer-than-36 all-hex finding value', () => {
     const long = 'a'.repeat(40);
     expect(resolveCitationMap(`- [^k]: x · finding:: ${long}`).get('k')).toBe(long);
+  });
+});
+
+// ── formatPageRecall — CLI text roll-up line (kb-projection-6ji.9) ────────────
+describe('formatPageRecall — CLI display of a PageRecall', () => {
+  test('flat page (findings only in :root) shows just the page roll-up, no redundant :root breakdown', () => {
+    const FIX = [
+      '- A _(well-supported)_ [^a]',
+      '- B _(unverified: unsupported by cited source)_',
+      '- Citations',
+      `- [^a]: A · finding:: ${UUID_A}`,
+    ].join('\n');
+    expect(formatPageRecall(scoreRegionRecall(FIX))).toBe('recall 1/2=0.50');
+  });
+
+  test('multi-region page appends a per-heading-region breakdown, omitting ROOT and zero-finding regions', () => {
+    const FIX = [
+      '- Root _(well-supported)_ [^r]',
+      '## Alpha',
+      '- A _(well-supported)_ [^a]',
+      '- B _(unverified: unsupported by cited source)_',
+      '## Empty',
+      '- just prose',
+      '- Citations',
+      `- [^r]: R · finding:: ${UUID_C}`,
+      `- [^a]: A · finding:: ${UUID_A}`,
+    ].join('\n');
+    // page 2/3; alpha 1/2; root omitted (its 1/1 is folded into the page roll-up); empty omitted (0 findings)
+    expect(formatPageRecall(scoreRegionRecall(FIX))).toBe('recall 2/3=0.67 · alpha 1/2=0.50');
+  });
+
+  test('zero-findings page renders n/a, never NaN', () => {
+    expect(formatPageRecall(scoreRegionRecall('## Empty\n- prose only'))).toBe('recall 0/0=n/a');
   });
 });
