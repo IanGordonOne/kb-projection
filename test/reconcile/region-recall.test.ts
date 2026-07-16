@@ -446,3 +446,81 @@ describe('formatPageRecall — CLI display of a PageRecall', () => {
     expect(formatPageRecall(scoreRegionRecall('## Empty\n- prose only'))).toBe('recall 0/0=n/a');
   });
 });
+
+// ── :root sub-division by source-group bullet (kb-projection-6ji.11) ──────────
+// Opt-in (opts.subdivideRoot); default OFF must not change flat-:root behavior.
+describe('subdivideRoot — per-source-group sub-regions (reporting-only)', () => {
+  // Real projected shape: a col-0 source header (no band) then col-0 sibling findings.
+  const TWO_SOURCES = [
+    '- Smith 2019 (paper, /x)',
+    '- Claim A _(well-supported)_ [^a]',
+    '- Claim B _(well-supported)_ [^b]',
+    '- Doe 2020 (paper, /y)',
+    '- Claim C _(well-supported)_ [^c]',
+    '- Claim D _(unverified: unsupported by cited source)_',
+    '- Citations',
+    `- [^a]: A · finding:: ${UUID_A}`,
+    `- [^b]: B · finding:: ${UUID_B}`,
+    `- [^c]: C · finding:: ${UUID_C}`,
+  ].join('\n');
+
+  test('default (subdivideRoot off) keeps the flat :root contract — all findings in :root, no src regions', () => {
+    const page = scoreRegionRecall(TWO_SOURCES);
+    expect(rootOf(page).total).toBe(4);
+    expect(page.regions.some((r) => r.id.startsWith('src:'))).toBe(false);
+  });
+
+  test('on: each source group becomes a src:<slug> sub-region with its own cited/total; :root empties', () => {
+    const page = scoreRegionRecall(TWO_SOURCES, 'p', { subdivideRoot: true });
+    const smith = regionOf(page, 'src:smith-2019');
+    const doe = regionOf(page, 'src:doe-2020');
+    expect([smith.cited, smith.total]).toEqual([2, 2]);
+    expect([doe.cited, doe.total]).toEqual([1, 2]);
+    expect(doe.recall).toBe(1 / 2);
+    expect(rootOf(page).total).toBe(0); // no header-less loose findings here
+  });
+
+  test('on: partition invariant holds against an INDEPENDENT count (page == Σ region, no double/drop)', () => {
+    const page = scoreRegionRecall(TWO_SOURCES, 'p', { subdivideRoot: true });
+    expect(page.total).toBe(4); // independent: four band lines
+    expect(page.cited).toBe(3); // three carry a [^key]
+    expect(page.regions.reduce((s, r) => s + r.total, 0)).toBe(page.total);
+    expect(page.regions.reduce((s, r) => s + r.cited, 0)).toBe(page.cited);
+  });
+
+  test('on: a header-less loose finding (before any source header) stays in :root', () => {
+    const FIX = [
+      '- Loose _(well-supported)_ [^l]',
+      '- Smith 2019 (paper, /x)',
+      '- Grouped _(well-supported)_ [^g]',
+      '- Citations',
+      `- [^l]: L · finding:: ${UUID_A}`,
+      `- [^g]: G · finding:: ${UUID_B}`,
+    ].join('\n');
+    const page = scoreRegionRecall(FIX, 'p', { subdivideRoot: true });
+    expect(rootOf(page).total).toBe(1);
+    expect(regionOf(page, 'src:smith-2019').total).toBe(1);
+  });
+
+  test('on: a heading region still takes precedence over source-group sub-division', () => {
+    const FIX = [
+      '## Section',
+      '- Under heading _(well-supported)_ [^h]',
+      '- Citations',
+      `- [^h]: H · finding:: ${UUID_A}`,
+    ].join('\n');
+    const page = scoreRegionRecall(FIX, 'p', { subdivideRoot: true });
+    expect(regionOf(page, 'section').total).toBe(1);
+    expect(page.regions.some((r) => r.id.startsWith('src:'))).toBe(false);
+  });
+
+  test('on: the real AI-Agent-Memory snapshot collapses to one src sub-region of 16, :root empty', () => {
+    const page = scoreRegionRecall(AI_AGENT_MEMORY_PROJECTED, 'p', { subdivideRoot: true });
+    const src = page.regions.filter((r) => r.id.startsWith('src:'));
+    expect(src.length).toBe(1);
+    expect(src[0].total).toBe(16);
+    expect(src[0].cited).toBe(16);
+    expect(rootOf(page).total).toBe(0);
+    expect(page.total).toBe(16); // page roll-up unchanged by sub-division
+  });
+});

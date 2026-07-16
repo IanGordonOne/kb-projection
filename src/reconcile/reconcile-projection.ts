@@ -519,7 +519,8 @@ export function reconcileManifest(opts: {
       const raw = readFileSync(sourcePath, 'utf8');
       const grounded = sourceIsGrounded(raw);
       const desiredContent = stampProjected(projectSourcePage(raw, publishedSlugs, titleToSlug), entry.title);
-      const regionRecall = grounded ? scoreRegionRecall(desiredContent, slug) : undefined;
+      // subdivideRoot: reporting surfaces per-source-group recall (6ji.11); never gates.
+      const regionRecall = grounded ? scoreRegionRecall(desiredContent, slug, { subdivideRoot: true }) : undefined;
 
       // Grounding gate: a below-bar grounded source is excluded from the outward projection.
       let gate: FaithfulnessGateResult | undefined;

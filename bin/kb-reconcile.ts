@@ -150,7 +150,7 @@ function main(): number {
   }
 
   const res = reconcilePage({ desiredContent, pageFile: page, sidecarFile: sidecar, dryRun: Boolean(args.plan) });
-  const regionRecall = grounded ? scoreRegionRecall(desiredContent, basename(page)) : undefined;
+  const regionRecall = grounded ? scoreRegionRecall(desiredContent, basename(page), { subdivideRoot: true }) : undefined;
   if (args.json) { console.log(JSON.stringify({ ...res, grounded, regionRecall }, null, 2)); return 0; }
 
   const order: Record<string, number> = { remove: 0, regenerate: 1, create: 2, unchanged: 3 };

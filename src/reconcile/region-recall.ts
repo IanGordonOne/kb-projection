@@ -1,7 +1,7 @@
 /**
  * region-recall — per-region citation-recall scoring (kb-projection-6ji.8, files-canonical).
  */
-import { parseRegions, regionSpan, type Region } from './region-core';
+import { parseRegions, regionSpan, slugify, type Region } from './region-core';
 
 export const ROOT_REGION_ID = ':root';
 
@@ -68,6 +68,33 @@ function isFindingLine(line: string): boolean {
 
 function citationKey(line: string): string | undefined {
   return line.match(REF_INLINE)?.[1];
+}
+
+// A source-group header is a COL-0 bullet (`- …`, no leading indent — findings'
+// `kind::`/`locator::` sub-bullets are indented and thus excluded) that is not
+// itself a finding, not a Citations definition line, and not a structural header
+// (Citations / Unverified block). Its title (minus a trailing `(kind, path)`
+// parenthetical) seeds a `src:<slug>` sub-region id (kb-projection-6ji.11).
+const COL0_BULLET = /^[-*]\s+(.*)$/;
+
+function sourceGroupTitle(line: string): string | undefined {
+  const m = line.match(COL0_BULLET);
+  if (!m) return undefined;
+  const text = m[1].trim();
+  if (!text) return undefined;
+  if (isFindingLine(line)) return undefined;
+  if (/^\[\^[^\]]+\]:/.test(text)) return undefined; // Citations definition line
+  if (/^(?:Citations|Unverified)\b/i.test(text)) return undefined; // structural header
+  return text;
+}
+
+function srcRegionId(title: string, used: Set<string>): string {
+  const stripped = title.replace(/\s*\([^()]*\)\s*$/, '').trim() || title;
+  const base = `src:${slugify(stripped).slice(0, 60) || 'group'}`;
+  let id = base;
+  for (let n = 2; used.has(id); n++) id = `${base}-${n}`;
+  used.add(id);
+  return id;
 }
 
 function recallOf(cited: number, total: number): number | null {
@@ -152,8 +179,19 @@ export function resolveCitationMap(projectedContent: string): Map<string, string
   return citationMap;
 }
 
+export interface ScoreOpts {
+  /**
+   * Sub-divide the synthetic ROOT bucket into per-source-group sub-regions
+   * (kb-projection-6ji.11, reporting-only). A grounded research page nests findings
+   * under top-level `- <Source header>` bullets; with this on, each header's ROOT-bucket
+   * findings partition into a `src:<slug>` sub-region and ROOT keeps only header-less
+   * loose findings. Default OFF preserves the flat-ROOT P1 contract. Never gates.
+   */
+  subdivideRoot?: boolean;
+}
+
 /** Score every region (incl. synthetic ROOT) of a projected grounded page. Pure. */
-export function scoreRegionRecall(projectedContent: string, file = 'projected'): PageRecall {
+export function scoreRegionRecall(projectedContent: string, file = 'projected', opts: ScoreOpts = {}): PageRecall {
   const lines = splitLines(projectedContent);
   const citationMap = resolveCitationMap(projectedContent);
   const root: RegionRecall = {
@@ -166,11 +204,42 @@ export function scoreRegionRecall(projectedContent: string, file = 'projected'):
   };
   const regions = makeRegionEntries(projectedContent, file);
 
+  // Source-group sub-regions of the ROOT bucket (opt-in; 6ji.11). Built lazily on
+  // first finding so a header with no findings (e.g. `- Citations`) emits nothing.
+  const subRegions: RegionRecall[] = [];
+  const subById = new Map<string, RegionRecall>();
+  const usedSrcIds = new Set<string>();
+  let pendingGroup: { id: string; title: string } | undefined;
+
+  const groupTarget = (): RegionRecall => {
+    const g = pendingGroup!;
+    let region = subById.get(g.id);
+    if (!region) {
+      region = { id: g.id, kind: 'root', source: g.title, findingIds: [], cited: 0, total: 0, recall: null };
+      subById.set(g.id, region);
+      subRegions.push(region);
+    }
+    return region;
+  };
+
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
     const line = lines[lineIndex];
-    if (!isFindingLine(line)) continue;
+    const owner = owningRegion(lineIndex, regions)?.recall;
 
-    const target = owningRegion(lineIndex, regions)?.recall ?? root;
+    if (!isFindingLine(line)) {
+      // A COL-0 non-finding bullet OUTSIDE every heading/fence region opens a
+      // source-group; the id is minted now but the region only materializes when
+      // a finding lands (keeps zero-finding headers out of the output).
+      if (opts.subdivideRoot && !owner) {
+        const title = sourceGroupTitle(line);
+        if (title) pendingGroup = { id: srcRegionId(title, usedSrcIds), title };
+      }
+      continue;
+    }
+
+    // Heading/fence region wins; else a source-group sub-region (if opted in and
+    // one is open); else the ROOT bucket.
+    const target = owner ?? (opts.subdivideRoot && pendingGroup ? groupTarget() : root);
     target.total += 1;
 
     const key = citationKey(line);
@@ -180,7 +249,7 @@ export function scoreRegionRecall(projectedContent: string, file = 'projected'):
     if (findingId) target.findingIds.push(findingId);
   }
 
-  const scoredRegions = [root, ...regions.map((region) => region.recall)];
+  const scoredRegions = [root, ...regions.map((region) => region.recall), ...subRegions];
   let cited = 0;
   let total = 0;
   for (const region of scoredRegions) {
