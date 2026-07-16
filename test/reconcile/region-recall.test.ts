@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   ROOT_REGION_ID,
+  resolveCitationMap,
   scoreRegionRecall,
   type PageRecall,
   type RegionRecall,
@@ -338,5 +339,76 @@ describe('§5 #20 — real-corpus anchor', () => {
     expect(page.total).toBe(AI_AGENT_MEMORY_EXPECTED.total);
     expect(page.cited).toBe(AI_AGENT_MEMORY_EXPECTED.cited);
     expect(rootOf(page).total).toBe(AI_AGENT_MEMORY_EXPECTED.rootTotal);
+  });
+});
+
+// ── P4 audit hardening (kb-projection-6ji.8.5) ───────────────────────────────
+// The out-of-family (Cato/GPT) audit found the scorer CORRECT but flagged that
+// several hard-to-vary §3.4/§3.3 rules were not LOCKED by any test — a wrong
+// reimplementation could still pass the 20 §5 tests. These add the missing locks,
+// each with an INDEPENDENT expectation (not a Σ-tautology), so a subtly-wrong
+// impl goes red here.
+describe('P4-audit — hard-to-vary rules that the §5 suite under-locked', () => {
+  test('exact-match band: a lone _(unsupported)_ superstring is NOT a finding (an includes("supported") impl would fail)', () => {
+    // Guards §3.4 rule 2: "supported" must not substring-match inside unsupported/well-supported.
+    expect(scoreRegionRecall('- x _(unsupported)_').total).toBe(0);
+    expect(scoreRegionRecall('- x _(well-unsupported-thing)_').total).toBe(0);
+  });
+
+  test('partition: page totals equal an INDEPENDENT hardcoded count + pinned per-region totals (not Σ)', () => {
+    // #16 in §5 asserts page.cited === Σ region.cited, which is true by construction
+    // (region-recall.ts builds page totals as that sum) — tautological. Assert against
+    // the fixture's known integers instead: 3 band lines (2 cited), root=1, sec total=2/cited=1.
+    const FIX = [
+      '- Root claim _(well-supported)_ [^r]',
+      '## Sec',
+      '- Sec A _(well-supported)_ [^a]',
+      '- Sec B _(unverified: unsupported by cited source)_',
+      '- Citations',
+      `- [^r]: R · finding:: ${UUID_C}`,
+      `- [^a]: A · finding:: ${UUID_A}`,
+    ].join('\n');
+    const page = scoreRegionRecall(FIX);
+    expect(page.total).toBe(3); // independent: three allowlisted band lines
+    expect(page.cited).toBe(2); // two carry a trailing [^key]
+    expect(rootOf(page).total).toBe(1);
+    expect(rootOf(page).cited).toBe(1);
+    expect(regionOf(page, 'sec').total).toBe(2);
+    expect(regionOf(page, 'sec').cited).toBe(1);
+  });
+
+  test('dangling ref: an unresolved [^key] still counts as cited but exposes no UUID (findingIds.length < cited)', () => {
+    const FIX = ['- A _(well-supported)_ [^missing]', '- Citations', `- [^other]: x · finding:: ${UUID_A}`].join('\n');
+    const root = rootOf(scoreRegionRecall(FIX));
+    expect(root.cited).toBe(1);
+    expect(root.findingIds.length).toBe(0);
+  });
+
+  test('CRLF input scores identically to LF (real projected pages may carry \\r\\n)', () => {
+    const lines = ['- A _(well-supported)_ [^a]', '- Citations', `- [^a]: A · finding:: ${UUID_A}`];
+    const lf = scoreRegionRecall(lines.join('\n'));
+    const crlf = scoreRegionRecall(lines.join('\r\n'));
+    expect(crlf.total).toBe(lf.total);
+    expect(crlf.cited).toBe(lf.cited);
+    expect(rootOf(crlf).findingIds).toEqual([UUID_A]);
+  });
+
+  test('fence region as a finding container: a band line inside a <!-- region: X --> fence attributes to that fence, not ROOT', () => {
+    const FIX = [
+      '<!-- region: block -->',
+      '- Fenced claim _(well-supported)_ [^a]',
+      '<!-- /region -->',
+      '- Citations',
+      `- [^a]: A · finding:: ${UUID_A}`,
+    ].join('\n');
+    const page = scoreRegionRecall(FIX);
+    const fence = page.regions.find((r) => r.kind === 'fence');
+    expect(fence?.total).toBe(1);
+    expect(rootOf(page).total).toBe(0);
+  });
+
+  test('CITE_DEF does not truncate a longer-than-36 all-hex finding value', () => {
+    const long = 'a'.repeat(40);
+    expect(resolveCitationMap(`- [^k]: x · finding:: ${long}`).get('k')).toBe(long);
   });
 });

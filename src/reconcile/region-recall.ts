@@ -7,7 +7,10 @@ export const ROOT_REGION_ID = ':root';
 
 const BAND = /_\(([^)]+)\)_/g;
 const REF_INLINE = /\[\^([^\]]+)\](?!:)/;
-const CITE_DEF = /^\s*-?\s*\[\^([^\]]+)\]:\s*.*\bfinding::\s*([0-9a-fA-F-]{36}|\S+)/;
+// The {36} alt carries a negative lookahead so a longer all-hex finding value is
+// NOT silently truncated to its first 36 chars — it falls through to \S+ and is
+// captured whole (P4 audit, kb-projection-6ji.8.5).
+const CITE_DEF = /^\s*-?\s*\[\^([^\]]+)\]:\s*.*\bfinding::\s*([0-9a-fA-F-]{36}(?![0-9a-fA-F-])|\S+)/;
 const SUPPORTED_BANDS = new Set(['well-supported', 'supported', 'grounded']);
 const UNVERIFIED = /^unverified\b/i;
 const PROJECTED_ANCHOR_RE = /<(?:Region|SectionHeading)\b[^>]*\bprojected\b/;
